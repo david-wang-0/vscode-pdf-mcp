@@ -130,6 +130,14 @@ test("C2: get_selection over MCP: primary, clipboard (C5-filled env, unattribute
   assert.equal(textOf(res), "source must be 'primary' or 'clipboard'");
 });
 
+test("C2: get_selection over MCP carries tex when the selection has SyncTeX source lines", async () => {
+  const tex = [{ file: path.join(docDir, "paper.tex"), lines: [4, 6] }];
+  setWindow([{ id: "1", path: pdf, page: 2, pages: 12, active: true, selection: { text: "regions", page: 2, tex } }]);
+  const res = await call("get_selection");
+  assert.deepEqual(JSON.parse(textOf(res)), { text: "regions", source: "primary", viewer: "vscode", path: pdf, page: 2, tex });
+  assert.deepEqual(res.structuredContent.tex, tex);
+});
+
 test("C3: goto over MCP: moves via the extension socket and returns the entry", async () => {
   setWindow([{ id: "1", path: pdf, page: 1, pages: 12, active: true }]);
   requests.length = 0;

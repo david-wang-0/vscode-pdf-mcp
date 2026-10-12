@@ -233,6 +233,35 @@ test("C2: any other source raises 'source must be 'primary' or 'clipboard'' befo
   assert.deepEqual(s.calls(), []);
 });
 
+test("C2: tex lists the selection's SyncTeX source lines per file, in document order", () => {
+  const r = rt();
+  const tex = [{ file: "/proj/main.tex", lines: [12, 14] }, { file: "/proj/chapters/one.tex", lines: [3, 3] }];
+  r.window({ focused: true, panels: [{ path: "/proj/main.pdf", active: true, selection: { text: "some words", page: 2, tex } }] });
+  assert.deepEqual(backend.getSelection("primary", { dir: r.dir }),
+    { text: "some words", source: "primary", viewer: "vscode", path: "/proj/main.pdf", page: 2, tex });
+});
+
+test("C2: tex is absent without SyncTeX data, with an empty or malformed list, and with nothing selected", () => {
+  for (const tex of [undefined, [], [{ file: "relative.tex", lines: [1, 2] }], [{ file: "/a.tex", lines: [3, 1] }], [{ file: "/a.tex", lines: [0, 1] }], "x"]) {
+    const r = rt();
+    r.window({ focused: true, panels: [{ path: "/proj/main.pdf", active: true, selection: /** @type {any} */ ({ text: "w", page: 1, tex }) }] });
+    const got = backend.getSelection("primary", { dir: r.dir });
+    assert.equal("tex" in got, false, JSON.stringify(tex));
+    assert.deepEqual(got, { text: "w", source: "primary", viewer: "vscode", path: "/proj/main.pdf", page: 1 });
+  }
+  const r = rt();
+  r.window({ focused: true, panels: [{ path: "/proj/main.pdf", active: true,
+    selection: { text: "", page: 1, tex: [{ file: "/proj/main.tex", lines: [1, 1] }] } }] });
+  assert.deepEqual(backend.getSelection("primary", { dir: r.dir }), { text: "", source: "primary" });
+  // the clipboard is never attributed, so never has tex
+  const s = makeStubs(["xclip"], { stdout: "clip" });
+  cleanups.push(s.cleanup);
+  r.window({ focused: true, panels: [{ path: "/proj/main.pdf", active: true,
+    selection: { text: "w", page: 1, tex: [{ file: "/proj/main.tex", lines: [1, 1] }] } }] });
+  assert.deepEqual(backend.getSelection("clipboard", { dir: r.dir, env: { PATH: s.bin, XDG_RUNTIME_DIR: "/nonexistent" } }),
+    { text: "clip", source: "clipboard" });
+});
+
 // ---- C3 -------------------------------------------------------------------------------
 
 test("C3: goto without a path shows the page of the active entry's document and returns its entry", async () => {
@@ -486,6 +515,42 @@ test("C7: the selection is cut at 2000 characters with ' […]' appended", () =>
 test("C7: an empty selection adds nothing", () => {
   assert.equal(hookText({ path: "/proj/a.pdf", page: 1, pages: 2, selection: { text: "", page: 1 } }),
     "The user is reading /proj/a.pdf in VS Code, page 1 of 2.");
+});
+
+test("C7: with tex, one Source line per file after the selection, relative to cwd inside it", () => {
+  const tex = [{ file: "/proj/main.tex", lines: [12, 14] }, { file: "/proj/chapters/one.tex", lines: [3, 3] },
+    { file: "/elsewhere/macros.tex", lines: [7, 9] }];
+  assert.equal(hookText({ path: "/proj/main.pdf", page: 2, pages: 5, selection: { text: "some words", page: 2, tex } }),
+    "The user is reading /proj/main.pdf in VS Code, page 2 of 5.\nSelected text (page 2):\nsome words"
+    + "\nSource: main.tex:12-14\nSource: chapters/one.tex:3\nSource: /elsewhere/macros.tex:7-9");
+});
+
+test("C7: Source paths are absolute when the file is outside cwd, even if the PDF is inside", () => {
+  assert.equal(hookText({ path: "/proj/sub/main.pdf", page: 1, pages: 1, selection: { text: "w", page: 1, tex: [{ file: "/proj/main.tex", lines: [2, 2] }] } }, "/proj/sub"),
+    "The user is reading /proj/sub/main.pdf in VS Code, page 1 of 1.\nSelected text (page 1):\nw\nSource: /proj/main.tex:2");
+});
+
+test("C7: Source lines follow the cut selection", () => {
+  const long = "x".repeat(2001);
+  assert.equal(hookText({ path: "/proj/a.pdf", page: 1, pages: 1, selection: { text: long, page: 1, tex: [{ file: "/proj/a.tex", lines: [1, 40] }] } }),
+    "The user is reading /proj/a.pdf in VS Code, page 1 of 1.\nSelected text (page 1):\n" + "x".repeat(2000) + " […]\nSource: a.tex:1-40");
+});
+
+test("C7: without tex there is no Source line, and an empty selection prints none either", () => {
+  assert.equal(hookText({ path: "/proj/a.pdf", page: 1, pages: 2, selection: { text: "w", page: 1 } }),
+    "The user is reading /proj/a.pdf in VS Code, page 1 of 2.\nSelected text (page 1):\nw");
+  assert.equal(hookText({ path: "/proj/a.pdf", page: 1, pages: 2, selection: { text: "", page: 1, tex: [{ file: "/proj/a.tex", lines: [1, 1] }] } }),
+    "The user is reading /proj/a.pdf in VS Code, page 1 of 2.");
+});
+
+test("C7: the hook binary prints the Source lines", () => {
+  const r = rt();
+  const proj = path.join(r.rt, "proj");
+  r.window({ focused: true, panels: [{ path: path.join(proj, "main.pdf"), page: 1, pages: 3, active: true,
+    selection: { text: "w", page: 1, tex: [{ file: path.join(proj, "main.tex"), lines: [5, 6] }] } }] });
+  const out = runHook(JSON.stringify({ cwd: proj }), { XDG_RUNTIME_DIR: r.rt });
+  assert.equal(out.status, 0);
+  assert.match(JSON.parse(out.stdout).hookSpecificOutput.additionalContext, /\nSelected text \(page 1\):\nw\nSource: main\.tex:5-6$/);
 });
 
 // ---- C8 -------------------------------------------------------------------------------

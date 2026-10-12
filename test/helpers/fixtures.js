@@ -31,7 +31,8 @@ function killLive() {
 
 /**
  * @typedef {{id?: string, path: string, page?: number, pages?: number, active?: boolean,
- *            lastActiveAt?: number, selection?: {text: string, page: number} | null}} PanelSpec
+ *            lastActiveAt?: number, selection?: {text: string, page: number,
+ *            tex?: {file: string, lines: number[]}[]} | null}} PanelSpec
  * @typedef {{pid?: number, focused?: boolean, focusedAt?: number, workspaceFolders?: string[],
  *            panels?: PanelSpec[], socket?: string}} WindowSpec
  */
