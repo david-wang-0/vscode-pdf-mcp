@@ -188,6 +188,47 @@ test("webview renders, selects, follows goto, reloads in place and finds", async
   await page.close();
 });
 
+test("Ctrl+wheel zooms around the pointer; a plain wheel scrolls", async () => {
+  const pdf = path.join(tmp, "zoom.pdf");
+  fs.writeFileSync(pdf, samplePdf(3));
+  const { page, errors } = await open(await serve(pdf));
+  const zoom = async () => parseInt((await page.textContent("#zoomValue")) || "", 10);
+  const before = await zoom();
+
+  // the text under the pointer stays under it while zooming in
+  const span = page.locator(".page[data-page-number='1'] .textLayer span").first();
+  const box = await span.boundingBox();
+  assert.ok(box);
+  const x = box.x + 5, y = box.y + box.height / 2;
+  await page.mouse.move(x, y);
+  await page.keyboard.down("Control");
+  await page.mouse.wheel(0, -200);
+  await page.keyboard.up("Control");
+  await page.waitForFunction((b) => parseInt(document.getElementById("zoomValue")?.textContent || "", 10) > b, before);
+  assert.ok((await zoom()) > before);
+  await page.waitForSelector(".page[data-page-number='1'] .textLayer span");
+  const after = await span.boundingBox();
+  assert.ok(after && Math.abs(after.x - box.x) < 40 && Math.abs(after.y + after.height / 2 - y) < 40,
+    `pointer anchor moved: ${JSON.stringify(box)} -> ${JSON.stringify(after)}`);
+
+  // zoom out again
+  const zoomedIn = await zoom();
+  await page.keyboard.down("Control");
+  await page.mouse.wheel(0, 300);
+  await page.keyboard.up("Control");
+  await page.waitForFunction((b) => parseInt(document.getElementById("zoomValue")?.textContent || "", 10) < b, zoomedIn);
+
+  // without Ctrl the wheel scrolls and leaves the zoom alone
+  const z = await zoom();
+  const top = await page.evaluate(() => document.getElementById("viewerContainer")?.scrollTop ?? -1);
+  await page.mouse.wheel(0, 300);
+  await page.waitForFunction((t) => (document.getElementById("viewerContainer")?.scrollTop ?? -1) > t, top);
+  assert.equal(await zoom(), z);
+
+  assert.deepEqual(errors.filter((e) => !/Warning/.test(e)), []);
+  await page.close();
+});
+
 test("PyMuPDF-written underline and Text note render; links work", { skip: !process.env.VPDF_PYTHON && "set VPDF_PYTHON to a python with pymupdf" }, async () => {
   const pdf = path.join(tmp, "annotated.pdf");
   execFileSync(/** @type {string} */ (process.env.VPDF_PYTHON), ["-I", path.join(root, "scripts/make-annotated-pdf.py"), pdf]);

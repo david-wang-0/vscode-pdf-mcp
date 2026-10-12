@@ -283,6 +283,14 @@ pageInput.addEventListener("keydown", (e) => {
 });
 $("zoomIn").addEventListener("click", () => pdfViewer.increaseScale());
 $("zoomOut").addEventListener("click", () => pdfViewer.decreaseScale());
+// Ctrl+wheel (and touchpad pinch, which Chromium reports as Ctrl+wheel) zooms around the
+// pointer. The PDFViewer component, unlike pdf.js's full viewer app, has no wheel zoom.
+container.addEventListener("wheel", (e) => {
+  if (!(e.ctrlKey || e.metaKey) || !pdfDocument) return;
+  e.preventDefault();
+  const pixels = e.deltaY * (e.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : e.deltaMode === WheelEvent.DOM_DELTA_PAGE ? 400 : 1);
+  pdfViewer.updateScale({ scaleFactor: Math.exp(-pixels / 400), origin: [e.clientX, e.clientY] });
+}, { passive: false });
 $("fitWidth").addEventListener("click", () => {
   pdfViewer.currentScaleValue = "page-width";
 });
