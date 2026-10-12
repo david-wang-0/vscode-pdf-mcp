@@ -1,0 +1,311 @@
+// @ts-check
+/**
+ * lib/synctex.js: parsing, reverse and forward search, and the selection-to-source
+ * mapping, checked against the `synctex` command line tool on a LaTeX project compiled
+ * with `pdflatex -synctex=1` (multi-file \input, a wrapped paragraph, display math, a
+ * list, two columns, two pages). Skipped, with the reason, without pdflatex or synctex.
+ */
+"use strict";
+
+const { test, before, after } = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const zlib = require("node:zlib");
+const { spawnSync } = require("node:child_process");
+const { parseSynctex, loadSynctex, synctexFileFor } = require("../lib/synctex");
+const { HAVE_PDFLATEX, HAVE_SYNCTEX, buildProject } = require("./helpers/latex");
+
+const SKIP_TEX = !HAVE_PDFLATEX && "pdflatex is not installed";
+const SKIP_ORACLE = SKIP_TEX || (!HAVE_SYNCTEX && "the synctex command line tool is not installed");
+
+/** @type {string} */
+let dir;
+/** @type {ReturnType<typeof buildProject>} */
+let project;
+/** @type {import("../lib/synctex").Synctex} */
+let data;
+
+before(async () => {
+  if (SKIP_TEX) return;
+  dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "vpdf-synctex-")));
+  project = buildProject(dir);
+  const loaded = await loadSynctex(project.pdf);
+  assert.ok(loaded);
+  data = loaded.data;
+});
+
+after(() => {
+  if (dir) fs.rmSync(dir, { recursive: true, force: true });
+});
+
+/** @param {string[]} args */
+function cli(args) {
+  const r = spawnSync("synctex", args, { cwd: dir, encoding: "utf8" });
+  return r.stdout || "";
+}
+
+/** `synctex edit`: the results, in order. @param {number} page @param {number} x @param {number} y */
+function cliEdit(page, x, y) {
+  const out = cli(["edit", "-o", `${page}:${x.toFixed(3)}:${y.toFixed(3)}:${project.pdf}`]);
+  /** @type {{file: string, line: number}[]} */
+  const res = [];
+  let file = "";
+  for (const l of out.split("\n")) {
+    if (l.startsWith("Input:")) file = path.resolve(l.slice(6));
+    else if (l.startsWith("Line:")) res.push({ file, line: Number(l.slice(5)) });
+  }
+  return res;
+}
+
+/** `synctex view`: per result, page and box [l, t, r, b]. @param {string} file @param {number} line */
+function cliView(file, line) {
+  const out = cli(["view", "-i", `${line}:0:${file}`, "-o", project.pdf]);
+  /** @type {{page: number, box: number[]}[]} */
+  const res = [];
+  /** @type {Record<string, number>} */
+  let cur = {};
+  for (const l of out.split("\n")) {
+    const m = /^(Page|h|v|W|H):(-?[\d.]+)$/.exec(l);
+    if (!m) continue;
+    if (m[1] === "Page" && "Page" in cur) {
+      res.push({ page: cur.Page, box: [cur.h, cur.v - cur.H, cur.h + cur.W, cur.v] });
+      cur = {};
+    }
+    cur[m[1]] = Number(m[2]);
+  }
+  if ("Page" in cur) res.push({ page: cur.Page, box: [cur.h, cur.v - cur.H, cur.h + cur.W, cur.v] });
+  return res;
+}
+
+/** @param {number[]} a @param {number[]} b @param {number} [tol] */
+const overlaps = (a, b, tol = 0.5) => a[0] < b[2] + tol && b[0] < a[2] + tol && a[1] < b[3] + tol && b[1] < a[3] + tol;
+
+/** Points over the text: across each line box at mid-height, and over each word if pdftotext is there. */
+function textPoints() {
+  /** @type {[number, number, number][]} */
+  const pts = [];
+  for (const page of data.pages) {
+    for (const box of data.hboxes.get(page) || []) {
+      if (!(box.kids || []).some((k) => k.t === "x" || k.t === "k")) continue;
+      const [l, t, r, b] = data.rect(box.hV, box.vV - box.HV, box.hV + Math.abs(box.WV), box.vV);
+      if (r - l < 2 || b - t < 2) continue;
+      for (const f of [0.03, 0.2, 0.37, 0.5, 0.63, 0.8, 0.97]) pts.push([page, l + f * (r - l), t + 0.6 * (b - t)]);
+    }
+  }
+  const words = spawnSync("pdftotext", ["-bbox", project.pdf, "-"], { encoding: "utf8" });
+  if (words.status === 0) {
+    let page = 0;
+    for (const l of words.stdout.split("\n")) {
+      if (l.includes("<page ")) page++;
+      const m = /xMin="([\d.]+)" yMin="([\d.]+)" xMax="([\d.]+)" yMax="([\d.]+)"/.exec(l);
+      if (m && page) {
+        const [x0, y0, x1, y1] = m.slice(1).map(Number);
+        pts.push([page, (x0 + x1) / 2, (y0 + y1) / 2], [page, x0 + 0.5, (y0 + y1) / 2], [page, x1 - 0.5, (y0 + y1) / 2]);
+      }
+    }
+  }
+  return pts;
+}
+
+// ---- parsing ---------------------------------------------------------------------------
+
+test("parse: inputs, pages, units and the records of a pdflatex synctex.gz", { skip: SKIP_TEX }, () => {
+  assert.deepEqual(data.pages, [1, 2]);
+  assert.ok(data.files.includes(project.main), data.files.join(", "));
+  assert.ok(data.files.includes(project.chapter));
+  assert.ok(Math.abs(data.unit - 1 / 65781.76) < 1e-12, "Unit:1 means sp");
+  assert.equal(data.xOffset, 0);
+  assert.equal(data.yOffset, 0);
+  assert.ok(data.covers(project.chapter));
+  assert.ok(!data.covers(path.join(dir, "nope.tex")));
+  // a relative path and the ./ of pdflatex's own paths resolve to the same file
+  assert.ok(data.covers(path.join(dir, "chapters", "..", "chapters", "one.tex")));
+});
+
+test("parse: gzip or plain, the newer of .synctex.gz and .synctex, relative inputs, '=' for the last v", { skip: SKIP_TEX }, async () => {
+  const plain = path.join(dir, "plain");
+  fs.mkdirSync(plain, { recursive: true });
+  const text = zlib.gunzipSync(fs.readFileSync(project.synctex)).toString("utf8");
+  fs.writeFileSync(path.join(plain, "doc.pdf"), "%PDF-1.4\n");
+  assert.equal(synctexFileFor(path.join(plain, "doc.pdf")), null);
+  assert.equal(await loadSynctex(path.join(plain, "doc.pdf")), null);
+  fs.writeFileSync(path.join(plain, "doc.synctex.gz"), zlib.gzipSync(text));
+  const old = Date.now() / 1000 - 60;
+  fs.utimesSync(path.join(plain, "doc.synctex.gz"), old, old);
+  fs.writeFileSync(path.join(plain, "doc.synctex"), text);
+  assert.equal(synctexFileFor(path.join(plain, "doc.pdf"))?.file, path.join(plain, "doc.synctex"));
+  const loaded = await loadSynctex(path.join(plain, "doc.pdf"));
+  assert.deepEqual(loaded?.data.pages, [1, 2]);
+
+  const small = parseSynctex([
+    "SyncTeX Version:1", "Input:1:./a.tex", "Output:pdf", "Magnification:2000", "Unit:1", "X Offset:0", "Y Offset:0",
+    "Content:", "{1", "[1,1:0,1000000:2000000,800000,0", "(1,3:100000,500000:1000000,100000,20000",
+    "x1,3:300000,=", "k1,3:400000,=:100000", "x1,4:700000,=", ")", "]", "}1", "Postamble:", "Count:3", "Post scriptum:", "",
+  ].join("\n"), { dir: plain });
+  assert.equal(small.fileOf(1), path.join(plain, "a.tex"));
+  assert.ok(Math.abs(small.unit - 2 / 65781.76) < 1e-12, "magnification 2000 doubles the unit");
+  // v of the "=" records is the hbox's 500000. Between the kern (line 3, after the
+  // heading boundary took its line) and the boundary of line 4: SyncTeX reports both,
+  // the smaller line first; the text under the point ends at the boundary, so it is 4.
+  const hit = small.edit(1, 650000 * small.unit, 480000 * small.unit);
+  assert.deepEqual(hit?.results.map((r) => r.line), [3, 4]);
+  assert.deepEqual([hit?.file, hit?.line], [path.join(plain, "a.tex"), 3]);
+  assert.equal(small.textAt(1, 650000 * small.unit, 480000 * small.unit)?.line, 4);
+  assert.equal(small.textAt(1, 250000 * small.unit, 480000 * small.unit)?.line, 3, "a heading boundary takes the next node's line");
+});
+
+// ---- reverse search --------------------------------------------------------------------
+
+test("reverse: same file and line as `synctex edit` on points over the text", { skip: SKIP_ORACLE }, () => {
+  const pts = textPoints();
+  let same = 0;
+  /** @type {string[]} */
+  const diffs = [];
+  for (const [page, x, y] of pts) {
+    const want = cliEdit(page, x, y)[0];
+    const got = data.edit(page, x, y);
+    if (want && got && want.file === got.file && want.line === got.line) same++;
+    else if (!want && !got) same++;
+    else diffs.push(`p${page} (${x.toFixed(1)}, ${y.toFixed(1)}): cli ${want ? `${path.basename(want.file)}:${want.line}` : "none"}, ours ${got ? `${path.basename(got.file)}:${got.line}` : "none"}`);
+  }
+  console.log(`# reverse oracle, text points: ${same}/${pts.length} agree`);
+  assert.ok(pts.length > 300, `${pts.length} points`);
+  assert.deepEqual(diffs, []);
+});
+
+test("reverse: same file and line as `synctex edit` on a grid over whole pages (margins, gaps)", { skip: SKIP_ORACLE }, () => {
+  let n = 0;
+  /** @type {string[]} */
+  const diffs = [];
+  for (const page of data.pages) {
+    for (let x = 20; x < 595; x += 37) {
+      for (let y = 20; y < 842; y += 23) {
+        n++;
+        const want = cliEdit(page, x, y)[0];
+        const got = data.edit(page, x, y);
+        if ((!want && !got) || (want && got && want.file === got.file && want.line === got.line)) continue;
+        diffs.push(`p${page} (${x}, ${y}): cli ${want ? `${path.basename(want.file)}:${want.line}` : "none"}, ours ${got ? `${path.basename(got.file)}:${got.line}` : "none"}`);
+      }
+    }
+  }
+  console.log(`# reverse oracle, page grid: ${n - diffs.length}/${n} agree`);
+  assert.deepEqual(diffs, []);
+});
+
+test("reverse: every result the CLI prints, in its order", { skip: SKIP_ORACLE }, () => {
+  const pts = textPoints().filter((_, i) => i % 3 === 0);
+  /** @type {string[]} */
+  const diffs = [];
+  for (const [page, x, y] of pts) {
+    const want = cliEdit(page, x, y).map((r) => `${path.basename(r.file)}:${r.line}`);
+    const got = (data.edit(page, x, y)?.results || []).map((r) => `${path.basename(r.file)}:${r.line}`);
+    if (JSON.stringify(want) !== JSON.stringify(got)) diffs.push(`p${page} (${x.toFixed(1)}, ${y.toFixed(1)}): cli ${want}, ours ${got}`);
+  }
+  console.log(`# reverse oracle, all results: ${pts.length - diffs.length}/${pts.length} agree`);
+  assert.deepEqual(diffs, []);
+});
+
+test("reverse: the underline lies on the printed line under the point", { skip: SKIP_TEX }, () => {
+  for (const [page, x, y] of textPoints().filter((_, i) => i % 5 === 0)) {
+    const hit = data.edit(page, x, y);
+    if (!hit) continue;
+    assert.ok(hit.rects.length >= 1);
+    for (const [l, t, r, b] of hit.rects) assert.ok(l < r && t < b, JSON.stringify(hit.rects));
+    assert.ok(hit.rects.some(([, t, , b]) => t - 1 <= y && y <= b + 1), `rects ${JSON.stringify(hit.rects)} cover y ${y}`);
+  }
+});
+
+test("reverse: a point on the input file's text maps to that file", { skip: SKIP_TEX }, () => {
+  const v = data.view(project.chapter, 2);
+  assert.ok(v);
+  const [l, t, r, b] = v.rects[0];
+  const hit = data.edit(v.page, (l + r) / 2, (t + b) / 2);
+  assert.deepEqual([hit?.file, hit?.line], [project.chapter, 2]);
+  assert.equal(data.edit(99, 100, 100), null, "no such page");
+});
+
+// ---- forward search --------------------------------------------------------------------
+
+test("forward: same page as `synctex view`, and boxes that overlap its boxes, for every line", { skip: SKIP_ORACLE }, () => {
+  let n = 0;
+  /** @type {string[]} */
+  const diffs = [];
+  for (const file of [project.main, project.chapter]) {
+    const count = fs.readFileSync(file, "utf8").split("\n").length;
+    for (let line = 1; line <= count; line++) {
+      n++;
+      const want = cliView(file, line);
+      const got = data.view(file, line);
+      const tag = `${path.basename(file)}:${line}`;
+      if (!want.length) {
+        if (got) diffs.push(`${tag}: cli none, ours page ${got.page}`);
+        continue;
+      }
+      if (!got) {
+        diffs.push(`${tag}: cli page ${want[0].page}, ours none`);
+        continue;
+      }
+      if (got.page !== want[0].page) {
+        diffs.push(`${tag}: cli page ${want[0].page}, ours ${got.page}`);
+        continue;
+      }
+      const theirs = want.filter((w) => w.page === got.page).map((w) => w.box);
+      for (const r of got.rects) {
+        if (!theirs.some((b) => overlaps(r, b))) diffs.push(`${tag}: our rect ${JSON.stringify(r)} overlaps none of ${JSON.stringify(theirs)}`);
+      }
+      for (const b of theirs) {
+        if (!got.boxes.some((r) => overlaps(r, b))) diffs.push(`${tag}: their box ${JSON.stringify(b)} is not among ours`);
+      }
+    }
+  }
+  console.log(`# forward oracle: ${n - diffs.length}/${n} lines agree`);
+  assert.deepEqual(diffs, []);
+});
+
+test("forward: specific lines land where the text is (wrapped paragraph, \\input, display math, two columns, page 2)", { skip: SKIP_TEX }, () => {
+  const wrapped = data.view(project.main, 8);
+  assert.equal(wrapped?.page, 1);
+  const eq = data.view(project.main, 15);
+  assert.equal(eq?.page, 1);
+  const chapter = data.view(project.chapter, 3);
+  assert.equal(chapter?.page, 1);
+  const right = data.view(project.main, 28);
+  const left = data.view(project.main, 24);
+  assert.ok(right && left && right.rects[0][0] > left.rects[0][2] - 1, "the right column is right of the left one");
+  assert.equal(data.view(project.main, 34)?.page, 2);
+  assert.equal(data.view(path.join(dir, "missing.tex"), 3), null);
+  // a line without records (a blank line) takes the nearest one that has some
+  assert.ok(data.view(project.main, 11));
+});
+
+// ---- selections ------------------------------------------------------------------------
+
+test("selection: rects map to {file, lines} per file in document order", { skip: SKIP_TEX }, () => {
+  const a = /** @type {NonNullable<ReturnType<typeof data.view>>} */ (data.view(project.main, 7));
+  const b = /** @type {NonNullable<ReturnType<typeof data.view>>} */ (data.view(project.main, 9));
+  const c = /** @type {NonNullable<ReturnType<typeof data.view>>} */ (data.view(project.chapter, 2));
+  const d = /** @type {NonNullable<ReturnType<typeof data.view>>} */ (data.view(project.chapter, 3));
+  assert.ok(a && b && c && d);
+  const shrink = (/** @type {number[]} */ r) => [r[0] + 1, r[1] + 1, r[2] - 1, r[3] - 1];
+  const parts = [
+    { page: a.page, rects: [...a.rects, ...b.rects].map(shrink) },
+    { page: c.page, rects: [...c.rects, ...d.rects].map(shrink) },
+  ];
+  assert.deepEqual(data.sourceOfSelection(parts), [
+    { file: project.main, lines: [7, 9] },
+    { file: project.chapter, lines: [2, 3] },
+  ]);
+  assert.deepEqual(data.sourceOfSelection([]), []);
+  assert.deepEqual(data.sourceOfSelection([{ page: 1, rects: [[1, 2, "x", 4]] }, /** @type {any} */ (null)]), []);
+});
+
+test("selection: a selection of the first words of a source line does not pull in the line before", { skip: SKIP_TEX }, () => {
+  const v = /** @type {NonNullable<ReturnType<typeof data.view>>} */ (data.view(project.main, 8));
+  // the stretch of line 8 that starts a printed line, or the first one
+  const [l, t, r, b] = v.rects[0];
+  const right = Math.min(r, l + 30);
+  const src = data.sourceOfSelection([{ page: v.page, rects: [[l + 1, t + 1, right, b - 1]] }]);
+  assert.deepEqual(src, [{ file: project.main, lines: [8, 8] }]);
+});
