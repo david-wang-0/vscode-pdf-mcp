@@ -8,7 +8,9 @@ Three parts, one npm package:
 
 1. **A VS Code extension**: a custom editor for `*.pdf` built on
    [pdf.js](https://mozilla.github.io/pdf.js/) (text selection, annotations with their
-   notes, links, Ctrl+F). It publishes what you are reading and accepts `goto`.
+   notes and reply threads, links, Ctrl+F). It publishes what you are reading and accepts
+   `goto`, and you mark the PDF in it as in Okular: highlight, underline, squiggly,
+   strikeout, margin notes and replies (see [Marking](#marking)).
 2. **An MCP stdio server**, `vscode-pdf-mcp` (server name `vscode-pdf`), with the tools
    `viewer_state`, `get_selection` and `goto`.
 3. **A Claude Code `UserPromptSubmit` hook**, `vscode-pdf-mcp-hook`, that adds one line of
@@ -23,7 +25,10 @@ other. Neither server reads or writes PDF content. That is **pdf-reader-writer-m
 reads page text, links and annotations and writes highlights and notes into the file with
 PyMuPDF (incremental saves), taking the `path` and `page` these servers report. The VS Code
 viewer watches the file and re-renders when it changes, keeping your page, scroll position
-and zoom; it has no unsaved state, so unlike Okular there is nothing to save first.
+and zoom; it has no unsaved state, so unlike Okular there is nothing to save first. Your
+own marks take the same path: the viewer writes them through pdf-reader-writer-mcp's
+*edit service*, so the agent's marks and yours are the same kind of standard annotation,
+written under one file lock.
 
 ## Tools
 
@@ -65,6 +70,17 @@ or linked from the checkout, so `git pull` updates it (reload the VS Code window
 ```sh
 ln -s "$PWD" "$HOME/.vscode/extensions/david-wang-0.vscode-pdf-mcp-0.1.0"
 ```
+
+**Marking** needs pdf-reader-writer-mcp's edit service, `pdf-reader-writer-edit`, on your
+`PATH`. Installing pdf-reader-writer-mcp puts it there next to `pdf-reader-writer-mcp`:
+
+```sh
+uv tool install git+https://github.com/david-wang-0/pdf-reader-writer-mcp
+```
+
+Elsewhere, point the `vscodePdfMcp.editCommand` setting at it (and `vscodePdfMcp.editArgs`
+for arguments). Without it the viewer works as before, with the mark tools off and one
+message per window saying why.
 
 **The two executables** (`vscode-pdf-mcp`, `vscode-pdf-mcp-hook`) on your `PATH`:
 
@@ -138,6 +154,10 @@ installed (`vscode.openWith(uri, 'pdfExternalOpen.editor')`), and otherwise run 
 | Setting | Default | Meaning |
 |---|---|---|
 | `vscodePdfMcp.externalViewer` | `okular` | Executable for *Open in Okular* when `pdf-external-open` is not installed; run with the PDF's absolute path as its only argument |
+| `vscodePdfMcp.editCommand` | `pdf-reader-writer-edit` | The edit service every mark is written through (looked up on `PATH` unless absolute) |
+| `vscodePdfMcp.editArgs` | `[]` | Its arguments |
+| `vscodePdfMcp.author` | your login name | The author (`/T`) of your marks, and whose marks you may edit and delete |
+| `vscodePdfMcp.keys` | see [Marking](#marking) | Shortcuts, e.g. `{"highlight": "shift+h", "undo": "ctrl+z"}` |
 
 Environment variables (server, hook and extension host alike):
 
@@ -146,18 +166,20 @@ Environment variables (server, hook and extension host alike):
 | `XDG_RUNTIME_DIR` | Where the state directory lives; `/run/user/<uid>` when unset |
 | `VSCODE_PDF_MCP_DIR` | Overrides the whole state directory (tests, unusual setups) |
 | `VSCODE_PDF_MCP_DEBUG` | Extension: also print its log to the extension host's stdout |
+| `VSCODE_PDF_MCP_EDIT_COMMAND` | Extension: the edit service's executable, over `vscodePdfMcp.editCommand` (tests) |
 
 The extension logs to the output channel *PDF viewer (vscode-pdf-mcp)*.
 
 ## The viewer
 
 - pdf.js `PDFViewer` with the text layer (select text), the annotation layer (Highlight,
-  Underline, Squiggly, StrikeOut, Text notes and file attachments render; their notes pop
-  up on hover and click as in Firefox), internal links (citations, sections) and external
-  links (opened in your browser through `vscode.env.openExternal`).
+  Underline, Squiggly, StrikeOut, Text notes, file attachments and the rest render from
+  their appearance streams), internal links (citations, sections) and external links
+  (opened in your browser through `vscode.env.openExternal`). Notes and threads show in the
+  viewer's own tip and popover (see [Marking](#marking)), not in pdf.js's popups.
 - Toolbar: page number / total, zoom out, zoom in, fit width (the default; it keeps fitting
-  when the editor is resized), *Open in Okular*. Ctrl+F opens a find bar (Enter, Shift+Enter,
-  Escape).
+  when the editor is resized), the mark tools, *Annotations* (the side panel), *Open in
+  Okular*. Ctrl+F opens a find bar (Enter, Shift+Enter, Escape).
 - Chrome follows the VS Code theme; pages stay white.
 - The file is read through `vscode.workspace.fs` and posted to the webview, so PDFs outside
   the workspace work.
@@ -168,6 +190,62 @@ The extension logs to the output channel *PDF viewer (vscode-pdf-mcp)*.
   (caught mid-write) keeps the old render, and the next change is retried. A tab in the
   background parses the new file at once (so its page count is current) and shows it when
   you come back to it.
+
+## Marking
+
+You mark the PDF in the viewer much as in Okular. Every action is written to the file at
+once (there is nothing to save), and the tab reloads in place to show it.
+
+- **Mini-bar.** When you finish selecting text, a small bar appears next to it: the four
+  styles (highlight, underline, squiggly, strikeout), the nine colours, and *+ note*, which
+  opens a textbox for a note on the mark (Enter saves, Shift+Enter is a new line, Esc
+  cancels). A style marks in the current colour; a colour marks in the last style. Both are
+  remembered. Esc closes the bar.
+- **Toolbar.** The four style tools are sticky, like Okular's annotation bar: while one is
+  on, every selection you finish is marked at once. *Note* is the margin-note tool: click a
+  point on a page, type, Enter, and a comment icon is placed there (its top-left corner at
+  the point). The swatch button picks the colour, *Undo* undoes, *Annotations* opens the
+  side panel. Esc returns to no tool.
+- **Keys**, only when the focus is not in a text field: `H` highlight, `U` underline, `S`
+  squiggly, `X` strikeout (each marks the current selection), `N` the margin-note tool,
+  Esc no tool, Ctrl+Z undo. Change them with `vscodePdfMcp.keys` (actions `highlight`,
+  `underline`, `squiggly`, `strikeout`, `note`, `undo`; values like `"h"`, `"shift+h"`,
+  `"ctrl+z"`). The viewer stops the keys it handles, so VS Code does not act on them too.
+- **Colours**: blue, yellow (the default), green, orange, pink, purple, red, cyan and grey,
+  the palette of pdf-reader-writer-mcp; the viewer sends the name and the service writes its
+  exact value. The agent's marks default to light blue, so yours stand apart.
+- **Reading marks.** Hovering a mark shows its author and note. Clicking it opens a popover
+  with its whole thread: author, date, the marked text, the note and the replies, nested.
+  You can reply to any annotation, the agent's (`llm`) included, from the box at the bottom
+  or with *Reply* on any entry. On your own marks you also get *Edit* (the note), *Delete*,
+  the style buttons and the colours. Marks by others cannot be edited or deleted from the
+  viewer. **Own** means the annotation's author (`/T`) equals `vscodePdfMcp.author` (default:
+  your login name).
+- **Side panel** (*Annotations*): every annotation by page, in reading order, with a colour
+  chip, its type, author, the marked text, the note and the replies. Click one to go to it
+  and open its popover. It follows every reload.
+- **Undo** (Ctrl+Z or *Undo*) takes back your last action on this document in this window:
+  a new mark, note or reply is deleted, an edit, colour or style change is reverted, a
+  deletion is restored with its replies. The history is per document and lasts as long as
+  the window. Undoing a mark that someone else has replied to since is refused rather than
+  delete their reply. Marks made elsewhere (the agent, Okular) are not in it.
+
+The agent's marks keep appearing while you read: pdf-reader-writer-mcp writes the file, the
+viewer sees the change and reloads at the same place.
+
+### How it writes
+
+The extension starts **one edit service per window** (`pdf-reader-writer-edit`, from
+pdf-reader-writer-mcp) when the first PDF tab opens and talks to it in JSON lines over
+stdin and stdout; the protocol is pdf-reader-writer-mcp's `EDITING.md`. Each request opens
+the PDF fresh under an exclusive `flock` on the file, adds or changes the annotation with
+PyMuPDF and saves incrementally, so a mark from the viewer and one from the agent at the
+same moment never lose each other. Selections go over as rects in PDF user space (pdf.js
+`convertToPdfPoint`), one per text run, and the service snaps them to whole words. The
+service is restarted on the next action if it dies; if it is missing or speaks another
+protocol version, the mark tools are disabled with the reason in their tooltips and one
+warning per window. The extension never writes PDF bytes itself and does not use pdf.js's
+annotation editor.
 
 ## Internals
 
@@ -227,8 +305,19 @@ The hook reads only the state files: no socket, no pdf.js, a few milliseconds.
 
 Webview to extension messages: `ready`, `loaded {pages, page, reload}`,
 `loadError {message, reload}`, `page {page}`, `selection {selection}`,
-`gotoDone {reqId, page}`, `openLink {url}`, `openExternalViewer`, `error {message}`.
-Extension to webview: `load {data, reload}`, `goto {page, reqId}`, `visibility {visible}`.
+`gotoDone {reqId, page}`, `openLink {url}`, `openExternalViewer`, `error {message}`, and
+for marking `mark {reqId, parts: [{page, rects, text}], style, color, note?}`,
+`note {reqId, page, point, note, color}`, `reply {reqId, xref, note}`,
+`update {reqId, xref, note?, color?, style?}`, `delete {reqId, xref}`, `undo {reqId}`,
+`prefs {style, color}`.
+Extension to webview: `load {data, reload}`, `goto {page, reqId}`, `visibility {visible}`,
+`marking {enabled, reason, author, keys, style?, color?}`, `annotations {list}` (the edit
+service's `list`, for the marked text), `editResult {reqId, op, ok, result | error}`.
+
+Marking code: `extension/editservice.js` (the service client: spawn, framing, ids,
+restart), `extension/marks.js` (requests, per-document write queue and undo stack),
+`media/annotate.mjs` (the UI), `media/marking.mjs` and `media/keys.mjs` (palette,
+geometry, threads, shortcuts; shared with the unit tests).
 
 ## Gotchas
 
@@ -248,6 +337,19 @@ Extension to webview: `load {data, reload}`, `goto {page, reqId}`, `visibility {
   VS Code 1.90 ships (CSS `round()`), and 5.6 to 6.2 carry a security advisory
   (GHSA-hq66-cqwq-w95j). The webview runs with a strict CSP (nonce, no `eval`).
 - PDFs with JavaScript or XFA forms are shown without running scripts or XFA.
+- **Okular does not take the file lock.** It writes only when you save, so marks you have
+  made in Okular and not saved yet are at risk when this viewer or the agent writes the
+  file: Okular offers to reload, and reloading drops them. Save in Okular before marking
+  the same PDF here.
+- **Undo is this window's, per document, for this session**: it covers only what you did in
+  this viewer since the window opened, not the agent's marks or Okular's, and it does not
+  survive a window reload. Undoing the creation of a mark someone has since replied to is
+  refused.
+- Writers wait for the file lock by polling it, so a long burst from one side (dozens of
+  back-to-back writes) makes the other side wait until it ends; after 10 s the waiting side
+  gives up with `PDF is locked by another writer`, shown in the viewer's status line.
+- Each own write reloads the whole document in pdf.js (as any change on disk does), so a
+  very large PDF flickers briefly after each mark.
 
 ## Development
 
@@ -262,23 +364,40 @@ npm run test:integration      # a real VS Code under xvfb-run (skipped without x
   `C<N>: ...`), the state store, the socket framing, selection normalisation, and the MCP
   server over stdio with the SDK client. They use a temporary runtime directory with fake
   state files, a fake extension socket built from `extension/ipc.js`, and fake
-  `wl-paste`/`xclip`/`xsel` scripts on a temporary `PATH`.
+  `wl-paste`/`xclip`/`xsel` scripts on a temporary `PATH`. The marking units (service
+  client, request checks, ownership, undo stack and its xref remapping, palette, geometry,
+  threads, keys) run against `test/helpers/fake-edit-service.js`, a stand-in for
+  `pdf-reader-writer-edit` that speaks the same protocol.
 - `npm run test:webview` serves the webview through `scripts/serve-webview.js` (the same
   HTML and CSP as in VS Code, with a mocked `acquireVsCodeApi`) and drives it with
   `playwright-core`: rendering, mouse selection, goto, reload in place, a half-written
-  file, find, toolbar. Set `CHROMIUM` to a Chromium or Chrome executable (otherwise
-  Playwright's own download is used) and `VPDF_PYTHON` to a Python with `pymupdf` to also
-  check PyMuPDF-written underlines and notes (`scripts/make-annotated-pdf.py`) and links.
+  file, find, toolbar, and marking with a mocked extension: the mini-bar and the `mark`
+  request with PDF-space rects, sticky tools, the margin-note click, keys, the popover
+  thread and replies, edit/restyle/delete only on own marks, and the side panel. Set
+  `CHROMIUM` to a Chromium or Chrome executable (otherwise Playwright's own download is
+  used) and `VPDF_PYTHON` to a Python with `pymupdf` to also check PyMuPDF-written
+  underlines and notes (`scripts/make-annotated-pdf.py`) and links.
 - `npm run test:integration` downloads VS Code into `.vscode-test/` with
   `@vscode/test-electron` and runs `test/integration/suite.js` in it with a scratch
   user-data and extensions directory, under `xvfb-run` with `WAYLAND_DISPLAY` unset, so no
   window appears on your desktop. `VSCODE_VERSION=1.90.0` tests the oldest supported VS
   Code. It opens generated PDFs, checks the state file, goto over the socket (including
   opening a closed file and `cannot open`), replace-by-rename reloads of a background tab,
-  the hook, and *Open in Okular* against a fake command.
+  the hook, and *Open in Okular* against a fake command. VS Code runs with a
+  remote-debugging port and the suite drives the webview with real mouse and keyboard input
+  over CDP: it marks a selection, replies to an agent note, edits and deletes a mark and
+  undoes both with Ctrl+Z (checking that VS Code's own keybindings never see the keys), and
+  reads the PDF back with PyMuPDF. A concurrency test has the viewer and
+  pdf-reader-writer-mcp's MCP server mark one file at the same time and checks that every
+  mark of both is there; a control run against a writer that skips the lock logs what it
+  loses. This part needs `pdf-reader-writer-edit` (`VSCODE_PDF_MCP_EDIT_COMMAND` or `PATH`),
+  `pdf-reader-writer-mcp` (`VPDF_PRW_MCP` or `PATH`) and `VPDF_PYTHON`, and is skipped
+  without them. On VS Code 1.90, Playwright cannot reach the webview's frame, so the
+  mouse-and-keyboard steps are skipped there.
 - `node scripts/serve-webview.js some.pdf 8000` serves the webview for a browser by hand.
 - Plain JavaScript with `// @ts-check` and JSDoc types, no build step. vscode-free logic
-  lives in `lib/` and `extension/{state,ipc,html}.js`; `extension/extension.js` is the glue.
+  lives in `lib/` and `extension/{state,ipc,html,editservice,marks}.js`;
+  `extension/extension.js` is the glue.
 
 ## License
 
