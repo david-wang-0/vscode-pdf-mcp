@@ -82,23 +82,14 @@
     "vscode-pdf-mcp": "mcp/server.js",
     "vscode-pdf-mcp-hook": "bin/hook.js"
   },
-  "files": [
-    "extension/",
-    "lib/",
-    "mcp/",
-    "bin/",
-    "media/",
-    "CONTRACT.md",
-    "README.md",
-    "LICENSE"
-  ],
   "scripts": {
     "test": "node --test test/*.test.js",
+    "test:webview": "node --test test/webview/run.js",
     "test:integration": "node test/integration/run.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",
-    "pdfjs-dist": "6.4.299",
+    "pdfjs-dist": "5.4.624",
     "zod": "4.6.6"
   },
   "devDependencies": {

@@ -99,7 +99,10 @@ class PdfPanel {
     owner.store.updatePanel(id, { active: panel.active });
     const subs = [
       webview.onDidReceiveMessage((m) => this.onMessage(m)),
-      panel.onDidChangeViewState((e) => owner.store.updatePanel(id, { active: e.webviewPanel.active })),
+      panel.onDidChangeViewState((e) => {
+        owner.store.updatePanel(id, { active: e.webviewPanel.active });
+        void webview.postMessage({ type: "visibility", visible: e.webviewPanel.visible });
+      }),
     ];
     panel.onDidDispose(() => {
       this.disposed = true;
@@ -118,6 +121,7 @@ class PdfPanel {
     const store = this.owner.store;
     switch (m.type) {
       case "ready":
+        void this.panel.webview.postMessage({ type: "visibility", visible: this.panel.visible });
         void this.sendFile(false);
         break;
       case "loaded":
@@ -125,7 +129,7 @@ class PdfPanel {
         this.page = m.page;
         store.updatePanel(this.id, { pages: m.pages, page: m.page });
         this.resolveLoaded?.();
-        if (m.reload) trace(`reloaded ${this.path} (${m.pages} pages)`);
+        if (m.reload) trace(`reloaded ${this.path} (${m.pages} pages, at page ${m.page})`);
         break;
       case "loadError":
         trace(`cannot load ${this.path}: ${m.message}`);

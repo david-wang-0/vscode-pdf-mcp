@@ -8,7 +8,7 @@
  * Messages to the extension: ready, loaded {pages, page, reload}, loadError {message,
  * reload}, page {page}, selection {selection: {text, page} | null}, gotoDone {reqId, page},
  * openLink {url}, openExternalViewer.
- * Messages from the extension: load {data, reload}, goto {page, reqId}.
+ * Messages from the extension: load {data, reload}, goto {page, reqId}, visibility {visible}.
  */
 
 import { normaliseSelection } from "./textnorm.mjs";
@@ -56,12 +56,13 @@ const pdfjsLib = await import(cfg.pdfjs);
 const { EventBus, PDFLinkService, PDFFindController, PDFViewer } = await import(cfg.pdfViewer);
 
 // The worker must be same-origin, and the webview's resources are not: load the worker
-// script as text and start it from a blob URL.
-{
+// script as text and start it from a blob URL. One PDFWorker serves every (re)load; a
+// worker passed to getDocument outlives the documents destroyed on reload.
+const pdfWorker = await (async () => {
   const src = await (await fetch(cfg.worker)).text();
   const url = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
-  pdfjsLib.GlobalWorkerOptions.workerPort = new Worker(url, { type: "module" });
-}
+  return new pdfjsLib.PDFWorker({ port: new Worker(url, { type: "module" }) });
+})();
 
 const eventBus = new EventBus();
 const linkService = new PDFLinkService({ eventBus });
@@ -77,39 +78,110 @@ const pdfViewer = new PDFViewer({
 });
 linkService.setViewer(pdfViewer);
 
+/**
+ * @typedef {{page: number, ratio: number, left: number, scale: string}} View
+ */
+
 /** @type {any} */
 let pdfDocument = null;
 let loadGeneration = 0;
-/** @type {{page: number, ratio: number, left: number, scale: string} | null} */
+/** @type {View | null} */
 let restoreView = null;
 let isReload = false;
 let lastPosted = "";
+/** The last position seen while visible: a hidden tab has no layout to measure. @type {View | null} */
+let lastView = null;
+/** A reloaded document parsed while the tab was hidden, swapped in when it is shown. @type {any} */
+let deferred = null;
+/** A goto received while hidden, re-applied when shown. @type {number | null} */
+let pendingPage = null;
 
-/** The visible position: page, offset inside it (fraction of its height), zoom. */
+/** Whether VS Code shows this tab (told by the extension); a hidden tab may still have a layout. */
+let panelVisible = true;
+const isVisible = () => panelVisible && container.clientWidth > 0 && container.clientHeight > 0;
+
+/** Things that wait for the tab to be shown: a deferred reload, a goto made while hidden. */
+function onShown() {
+  if (!isVisible()) return;
+  if (deferred) {
+    showDeferred();
+    return;
+  }
+  if (pendingPage !== null) {
+    pdfViewer.currentPageNumber = pendingPage;
+    pendingPage = null;
+  }
+}
+
+/** The visible position: page, offset inside it (fraction of its height), zoom. @returns {View | null} */
 function captureView() {
   const page = pdfViewer.currentPageNumber || 1;
   const view = pdfViewer.getPageView(page - 1);
-  if (!view) return null;
+  if (!view || !isVisible()) return null;
   const top = view.div.getBoundingClientRect().top - container.getBoundingClientRect().top;
   const ratio = view.div.clientHeight ? -top / view.div.clientHeight : 0;
   return { page, ratio, left: container.scrollLeft, scale: String(pdfViewer.currentScaleValue || "page-width") };
 }
 
-/** @param {{page: number, ratio: number, left: number, scale: string}} v */
+let rememberQueued = false;
+function remember() {
+  if (rememberQueued) return;
+  rememberQueued = true;
+  requestAnimationFrame(() => {
+    rememberQueued = false;
+    if (pdfDocument && !deferred && !restoreView) lastView = captureView() || lastView;
+  });
+}
+container.addEventListener("scroll", remember, { passive: true });
+
+/**
+ * Go back to `v`, through pdf.js's own XYZ destination so the current page is set even
+ * before the next scroll event.
+ * @param {View} v
+ */
 function applyView(v) {
   pdfViewer.currentScaleValue = v.scale;
   const page = Math.min(Math.max(1, v.page), pdfViewer.pagesCount);
   const view = pdfViewer.getPageView(page - 1);
-  if (!view) return;
-  const top = view.div.getBoundingClientRect().top - container.getBoundingClientRect().top;
-  container.scrollTop += top + v.ratio * view.div.clientHeight;
+  if (!view) {
+    pdfViewer.currentPageNumber = page;
+    return;
+  }
+  const [x, y] = view.viewport.convertToPdfPoint(0, v.ratio * view.viewport.height);
+  pdfViewer.scrollPageIntoView({ pageNumber: page, destArray: [null, { name: "XYZ" }, x, y, null], allowNegativeOffset: true });
   container.scrollLeft = v.left;
-  pdfViewer.update(); // recompute the current page now rather than on the next scroll event
+}
+
+/**
+ * pdf.js 5.4 keeps the page count in a global PagesMapper that the most recently parsed
+ * document sets. Keep it equal to the shown document's count, whatever was parsed since.
+ */
+function syncPageCount() {
+  const mapper = pdfjsLib.PagesMapper?.instance;
+  if (mapper && pdfDocument) mapper.pagesNumber = pdfDocument.numPages;
+}
+
+/** Show `doc`, restoring `view` (or fitting the width) once its pages are laid out. @param {any} doc @param {View | null} view @param {boolean} reload */
+function swapIn(doc, view, reload) {
+  const old = pdfDocument;
+  restoreView = view;
+  isReload = reload;
+  pdfDocument = doc;
+  if (old) {
+    // Unloading the old document zeroes pdf.js's global page count; give it back.
+    pdfViewer.setDocument(null);
+    syncPageCount();
+  }
+  pdfViewer.setDocument(doc);
+  linkService.setDocument(doc, null);
+  if (old && old !== doc) void old.loadingTask.destroy();
 }
 
 /**
  * Open `data`; on a reload keep the current render until the new file parses, then swap
  * it in at the same place. A file that fails to parse (mid-write) keeps the old render.
+ * A reload of a hidden tab is parsed now (so the page count is current) and shown when
+ * the tab is shown.
  * @param {Uint8Array} data @param {boolean} reload
  */
 async function load(data, reload) {
@@ -118,6 +190,7 @@ async function load(data, reload) {
   try {
     doc = await pdfjsLib.getDocument({
       data,
+      worker: pdfWorker,
       cMapUrl: cfg.cMapUrl,
       cMapPacked: true,
       standardFontDataUrl: cfg.standardFontDataUrl,
@@ -128,6 +201,7 @@ async function load(data, reload) {
       enableXfa: false,
     }).promise;
   } catch (e) {
+    syncPageCount();
     if (gen !== loadGeneration) return;
     const msg = e instanceof Error ? e.message : String(e);
     if (!reload || !pdfDocument) showMessage(`Cannot open this PDF: ${msg}`);
@@ -136,16 +210,29 @@ async function load(data, reload) {
   }
   if (gen !== loadGeneration) {
     void doc.loadingTask.destroy();
+    syncPageCount();
     return;
   }
   showMessage("");
-  const old = pdfDocument;
-  restoreView = reload && old ? captureView() : null;
-  isReload = reload;
-  pdfDocument = doc;
-  pdfViewer.setDocument(doc);
-  linkService.setDocument(doc, null);
-  if (old) void old.loadingTask.destroy();
+  if (reload && pdfDocument && !isVisible()) {
+    if (deferred) void deferred.loadingTask.destroy();
+    deferred = doc;
+    syncPageCount();
+    const page = Math.min(lastView?.page ?? pdfViewer.currentPageNumber ?? 1, doc.numPages);
+    post({ type: "loaded", pages: doc.numPages, page, reload: true });
+    return;
+  }
+  if (deferred) void deferred.loadingTask.destroy();
+  deferred = null;
+  swapIn(doc, reload && pdfDocument ? captureView() || lastView : null, reload);
+}
+
+/** Swap in a reload that arrived while the tab was hidden. */
+function showDeferred() {
+  if (!deferred || !isVisible()) return;
+  const doc = deferred;
+  deferred = null;
+  swapIn(doc, lastView, true);
 }
 
 eventBus.on("pagesinit", () => {
@@ -154,23 +241,32 @@ eventBus.on("pagesinit", () => {
   restoreView = null;
   numPages.textContent = `/ ${pdfViewer.pagesCount}`;
   pageInput.value = String(pdfViewer.currentPageNumber);
+  lastView = captureView() || lastView;
   post({ type: "loaded", pages: pdfViewer.pagesCount, page: pdfViewer.currentPageNumber, reload: isReload });
   if (!findbar.hidden && findInput.value) find("", false);
 });
 
 eventBus.on("pagechanging", (/** @type {{pageNumber: number}} */ { pageNumber }) => {
   pageInput.value = String(pageNumber);
-  post({ type: "page", page: pageNumber });
+  if (!deferred && !restoreView) {
+    post({ type: "page", page: pageNumber });
+    remember();
+  }
 });
 
 eventBus.on("scalechanging", (/** @type {{scale: number}} */ { scale }) => {
   zoomValue.textContent = `${Math.round(scale * 100)}%`;
+  remember();
 });
 
 // Keep "fit width" fitting when the editor is resized.
 new ResizeObserver(() => {
-  const v = pdfViewer.currentScaleValue;
-  if (pdfDocument && (v === "page-width" || v === "page-fit" || v === "auto")) pdfViewer.currentScaleValue = v;
+  if (!isVisible()) return;
+  if (!deferred) {
+    const v = pdfViewer.currentScaleValue;
+    if (pdfDocument && (v === "page-width" || v === "page-fit" || v === "auto")) pdfViewer.currentScaleValue = v;
+  }
+  onShown();
 }).observe(container);
 
 // ---- toolbar -------------------------------------------------------------------------
@@ -300,8 +396,25 @@ handle = (msg) => {
   if (!msg || typeof msg !== "object") return;
   if (msg.type === "load") {
     void load(msg.data instanceof Uint8Array ? msg.data : new Uint8Array(msg.data), !!msg.reload);
+  } else if (msg.type === "visibility") {
+    if (!msg.visible && panelVisible && !deferred && !restoreView) lastView = captureView() || lastView;
+    panelVisible = !!msg.visible;
+    if (panelVisible) requestAnimationFrame(onShown);
   } else if (msg.type === "goto") {
-    if (pdfDocument && msg.page >= 1 && msg.page <= pdfViewer.pagesCount) pdfViewer.currentPageNumber = msg.page;
+    showDeferred();
+    if (deferred || restoreView) {
+      // Not laid out yet (hidden, or pages still initialising): go there when it is.
+      const v = { page: msg.page, ratio: 0, left: 0, scale: (restoreView || lastView)?.scale || "page-width" };
+      if (restoreView) restoreView = v;
+      else lastView = v;
+      post({ type: "gotoDone", reqId: msg.reqId, page: msg.page });
+      return;
+    }
+    if (pdfDocument && msg.page >= 1 && msg.page <= pdfViewer.pagesCount) {
+      pdfViewer.currentPageNumber = msg.page;
+      if (!isVisible()) pendingPage = msg.page; // scroll again once there is a layout
+      lastView = captureView() || { page: msg.page, ratio: 0, left: 0, scale: lastView?.scale || "page-width" };
+    }
     post({ type: "gotoDone", reqId: msg.reqId, page: pdfViewer.currentPageNumber });
   }
 };

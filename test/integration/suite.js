@@ -106,6 +106,11 @@ async function run() {
   fs.writeFileSync(paper, samplePdf(6, "v3").subarray(0, 300));
   fs.writeFileSync(paper, samplePdf(6, "v3"));
   await waitFor(() => panelFor(paper)?.pages === 6, "reload to 6 pages");
+  // Shown again, the tab displays the new file at the old place.
+  await vscode.commands.executeCommand("vscode.open", vscode.Uri.file(paper));
+  await waitFor(() => panelFor(paper)?.active, "paper.pdf shown again");
+  await new Promise((r) => setTimeout(r, 750)); // let pdf.js settle its scroll position
+  assert.deepEqual([panelFor(paper)?.page, panelFor(paper)?.pages], [3, 6]);
 
   // 6. The hook sees the active tab for this workspace, and nothing for another cwd.
   await vscode.commands.executeCommand("vscode.open", vscode.Uri.file(other));
