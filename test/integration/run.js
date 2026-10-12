@@ -6,10 +6,18 @@
  * appears on the desktop. Skipped (exit 0, with a message) when xvfb-run is not installed.
  *
  *   npm run test:integration          [VSCODE_VERSION=1.90.0 to pin the VS Code under test]
+ *
+ * VS Code runs with a remote-debugging port, so the suite drives the webview with real
+ * mouse and keyboard input (playwright-core over CDP). The marking part needs
+ * pdf-reader-writer-mcp: its edit service (VSCODE_PDF_MCP_EDIT_COMMAND, else
+ * `pdf-reader-writer-edit` on PATH), its MCP server for the concurrency test (VPDF_PRW_MCP,
+ * else `pdf-reader-writer-mcp` on PATH) and a Python with pymupdf to read the PDFs back
+ * (VPDF_PYTHON). Without them that part is skipped, with a message.
  */
 "use strict";
 
 const fs = require("node:fs");
+const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
@@ -36,8 +44,30 @@ if (!process.env.VPDF_UNDER_XVFB) {
 const { runTests } = require("@vscode/test-electron");
 const { samplePdf } = require("../helpers/pdf");
 
+/** A free TCP port on 127.0.0.1. @returns {Promise<number>} */
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.on("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const { port } = /** @type {net.AddressInfo} */ (srv.address());
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
 async function main() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "vpdf-int-"));
+  const cdpPort = await freePort();
+  const editCommand = process.env.VSCODE_PDF_MCP_EDIT_COMMAND || which("pdf-reader-writer-edit", process.env) || "";
+  const mcpCommand = process.env.VPDF_PRW_MCP || which("pdf-reader-writer-mcp", process.env) || "";
+  // Keys the viewer handles are bound in VS Code too, to a visible command: if the viewer
+  // let one through, an untitled editor would appear. "k" (not the viewer's) is the control.
+  const user = path.join(tmp, "user-data", "User");
+  fs.mkdirSync(user, { recursive: true });
+  const when = "activeCustomEditorId == 'vscodePdfMcp.viewer'";
+  fs.writeFileSync(path.join(user, "keybindings.json"), JSON.stringify(["ctrl+z", "h", "k"].map((key) =>
+    ({ key, command: "workbench.action.files.newUntitledFile", when }))));
   const workspace = path.join(tmp, "workspace");
   const stateDir = path.join(tmp, "state");
   fs.mkdirSync(workspace);
@@ -61,12 +91,17 @@ async function main() {
         "--skip-release-notes",
         "--disable-gpu",
         "--no-sandbox",
+        `--remote-debugging-port=${cdpPort}`,
       ],
       extensionTestsEnv: {
         VSCODE_PDF_MCP_DIR: stateDir,
         VPDF_TEST_TMP: tmp,
         VPDF_FAKE_VIEWER: fake,
         VSCODE_PDF_MCP_DEBUG: "1",
+        VPDF_CDP_PORT: String(cdpPort),
+        VSCODE_PDF_MCP_EDIT_COMMAND: editCommand,
+        VPDF_PRW_MCP: mcpCommand,
+        VPDF_PYTHON: process.env.VPDF_PYTHON || "",
       },
     });
     const left = fs.readdirSync(stateDir);

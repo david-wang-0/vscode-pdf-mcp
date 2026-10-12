@@ -9,11 +9,18 @@
 const esc = (s) => s.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
 
 /**
- * @param {string[][]} pages lines of text per page
- * @param {{links?: {page: number, rect: number[], toPage: number}[]}} [opts] 1-based pages
- * @returns {Buffer}
+ * @typedef {{page: number, subtype: string, rect: number[], quads?: number[], color?: number[],
+ *   contents?: string, author?: string, irt?: number, date?: string}} AnnotSpec
+ *   `irt` is the index of the parent in the same `annots` list.
  */
-function makePdf(pages, { links = [] } = {}) {
+
+/**
+ * @param {string[][]} pages lines of text per page
+ * @param {{links?: {page: number, rect: number[], toPage: number}[], annots?: AnnotSpec[]}} [opts]
+ *   1-based pages
+ * @returns {Buffer & {annotIds?: number[]}} with `annotIds`: the object number of each annot
+ */
+function makePdf(pages, { links = [], annots = [] } = {}) {
   /** @type {string[]} */
   const objs = [];
   const n = pages.length;
@@ -30,6 +37,20 @@ function makePdf(pages, { links = [] } = {}) {
       `/Dest [${pageId(l.toPage - 1)} 0 R /XYZ 0 792 null] >>`]);
     annotsByPage.set(l.page, [...(annotsByPage.get(l.page) || []), id]);
   }
+  const annotIds = annots.map(() => next++);
+  annots.forEach((a, i) => {
+    const date = a.date || "D:20261012120000Z";
+    const parts = [`/Type /Annot /Subtype /${a.subtype} /Rect [${a.rect.join(" ")}] /P ${pageId(a.page - 1)} 0 R`,
+      `/F 4 /M (${date}) /CreationDate (${date})`];
+    if (a.quads) parts.push(`/QuadPoints [${a.quads.join(" ")}]`);
+    if (a.color) parts.push(`/C [${a.color.join(" ")}]`);
+    if (a.contents !== undefined) parts.push(`/Contents (${esc(a.contents)})`);
+    if (a.author !== undefined) parts.push(`/T (${esc(a.author)})`);
+    if (a.irt !== undefined) parts.push(`/IRT ${annotIds[a.irt]} 0 R`);
+    if (a.subtype === "Text") parts.push("/Name /Comment");
+    annotObjs.push([annotIds[i], `<< ${parts.join(" ")} >>`]);
+    annotsByPage.set(a.page, [...(annotsByPage.get(a.page) || []), annotIds[i]]);
+  });
   objs[1] = "<< /Type /Catalog /Pages 2 0 R >>";
   objs[2] = `<< /Type /Pages /Kids [${pages.map((_, i) => `${pageId(i)} 0 R`).join(" ")}] /Count ${n} >>`;
   objs[3] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>";
@@ -57,7 +78,7 @@ function makePdf(pages, { links = [] } = {}) {
   out += `xref\n0 ${objs.length}\n0000000000 65535 f \n`;
   for (let id = 1; id < objs.length; id++) out += `${String(offsets[id]).padStart(10, "0")} 00000 n \n`;
   out += `trailer\n<< /Size ${objs.length} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
-  return Buffer.from(out, "latin1");
+  return Object.assign(Buffer.from(out, "latin1"), { annotIds });
 }
 
 /**
@@ -80,4 +101,37 @@ function samplePdf(count, tag = "") {
   return makePdf(pages, { links: count >= 3 ? [{ page: 1, rect: [72, 640, 300, 660], toPage: 3 }] : [] });
 }
 
-module.exports = { makePdf, samplePdf };
+/** Lines of `samplePdf` pages, for annotated fixtures. @param {number} p @param {string} [tag] */
+function sampleLines(p, tag = "") {
+  return [
+    `Page ${p} heading ${tag}`.trim(),
+    "",
+    "Reachability of timed automata is decidable via regions.",
+    "This sentence is hyphen-",
+    "ated across two lines.",
+    `Unique marker alpha${p}.`,
+    ...Array.from({ length: 30 }, (_, k) => `Filler line ${k + 1} on page ${p}.`),
+  ];
+}
+
+/**
+ * Two pages with a thread by two authors: A, an `llm` highlight with a note, answered by
+ * B, a `david` reply; C, a `david` underline answered by E, an `llm` reply; D, an `llm`
+ * margin note. Returns the PDF and the object number (xref) of each.
+ */
+function threadPdf() {
+  const line = (/** @type {number} */ i, /** @type {number} */ x1) => [72, 703 - 14 * i, x1, 703 - 14 * i, 72, 689 - 14 * i, x1, 689 - 14 * i];
+  const [A, B, C, D, E] = [0, 1, 2, 3, 4];
+  const annots = [
+    { page: 1, subtype: "Highlight", rect: [70, 688, 402, 704], quads: line(0, 400), color: [1, 0.9, 0.3], contents: "An llm note", author: "llm" },
+    { page: 1, subtype: "Text", rect: [30, 700, 46, 716], color: [0.2, 0.45, 1], contents: "My answer", author: "david", irt: A, date: "D:20261012130000Z" },
+    { page: 1, subtype: "Underline", rect: [70, 646, 192, 662], quads: line(3, 190), color: [0.6, 0.9, 0.6], contents: "Mine", author: "david" },
+    { page: 1, subtype: "Text", rect: [30, 560, 46, 576], color: [0.2, 0.45, 1], contents: "Margin by llm", author: "llm" },
+    { page: 1, subtype: "Text", rect: [30, 630, 46, 646], color: [0.2, 0.45, 1], contents: "llm answers you", author: "llm", irt: C, date: "D:20261012140000Z" },
+  ];
+  const data = makePdf([sampleLines(1), sampleLines(2)], { annots });
+  const ids = /** @type {number[]} */ (data.annotIds);
+  return { data, xref: { A: ids[A], B: ids[B], C: ids[C], D: ids[D], E: ids[E] } };
+}
+
+module.exports = { makePdf, samplePdf, sampleLines, threadPdf };
