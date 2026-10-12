@@ -1,0 +1,21 @@
+# The .vsix carries only the extension: its code, the webview and the parts of pdf.js the
+# webview loads. The MCP server and the hook are installed with npm, not from the .vsix.
+**
+!package.json
+!README.md
+!LICENSE
+!CONTRACT.md
+!extension/**
+!lib/**
+!media/**
+!node_modules/pdfjs-dist/package.json
+!node_modules/pdfjs-dist/LICENSE
+!node_modules/pdfjs-dist/legacy/build/pdf.mjs
+!node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs
+!node_modules/pdfjs-dist/legacy/web/pdf_viewer.mjs
+!node_modules/pdfjs-dist/legacy/web/pdf_viewer.css
+!node_modules/pdfjs-dist/legacy/web/images/**
+!node_modules/pdfjs-dist/cmaps/**
+!node_modules/pdfjs-dist/standard_fonts/**
+!node_modules/pdfjs-dist/wasm/**
+!node_modules/pdfjs-dist/iccs/**
