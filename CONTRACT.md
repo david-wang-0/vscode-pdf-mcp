@@ -47,6 +47,11 @@ attributed to a document. `text` is `""` when nothing is selected (not an error)
 - `source="primary"`, Okular: the system primary selection (`wl-paste --primary`,
   else `xclip`/`xsel`), attributed to the active entry's path and page.
 - `source="clipboard"`: the system clipboard, never attributed (no `viewer`/`path`/`page`).
+- `tex` (optional): when the selection is attributed and the viewer can map it to LaTeX
+  source through SyncTeX, a list of `{"file": "<absolute .tex path>", "lines": [first,
+  last]}`, one entry per source file, in document order. Absent otherwise. (The VS Code
+  viewer supplies it for PDFs with a `.synctex.gz`/`.synctex` next to them; Okular never
+  does, because it reports no selection position.)
 - Any other `source` raises a tool error `source must be 'primary' or 'clipboard'`.
 
 **C3. `goto(page, path=None)`** shows `page` of `path` (default: the active entry's
@@ -92,6 +97,15 @@ followed, when the selection is attributable to that document (C2), by:
 Selected text (page <p>):
 <text>
 ```
+
+and, when C2 reports `tex`, one line per entry:
+
+```
+Source: <file>:<first>-<last>
+```
+
+(`:<first>` alone when `first` = `last`; `<file>` relative to `cwd` when it lies inside
+it, else absolute).
 
 The selected text is cut at 2000 characters, with ` […]` appended when cut. The Okular
 hook omits the selection: the system primary selection cannot be tied to Okular (it may
