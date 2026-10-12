@@ -5,6 +5,8 @@
  * "Open in Okular" (against a fake command). Then, with pdf-reader-writer-mcp's edit
  * service, marking with real mouse and keyboard input over CDP: mark, reply, edit,
  * delete, undo, keys kept from VS Code, and concurrent writes with the MCP server.
+ * With pdflatex, SyncTeX: Ctrl+click opens the source, forward search from the command
+ * and from vscode-pdf-mcp-open, the selection's source lines, and a rebuild.
  */
 "use strict";
 
@@ -139,6 +141,10 @@ async function run() {
   assert.throws(() => backend.viewerState({ dir }), { message: "no VS Code window with a PDF open" });
 
   await marking(ext);
+  await vscode.commands.executeCommand("workbench.action.closeAllEditors");
+  await waitFor(() => backend.readStates(dir).find((s) => s.pid === process.pid)?.panels.length === 0, "no panels left");
+
+  await synctex(ext);
   await vscode.commands.executeCommand("workbench.action.closeAllEditors");
   await waitFor(() => backend.readStates(dir).find((s) => s.pid === process.pid)?.panels.length === 0, "no panels left");
 }
@@ -458,5 +464,154 @@ async function concurrency(ext, client) {
   console.log(`integration: control without the lock: viewer writes ok ${fulfilled}/${N}, `
     + `unlocked writer ok ${nolock.ok}/${N}; in the file: ${survived}; repaired: ${ctlRepaired}`);
 }
+
+// ---- SyncTeX ------------------------------------------------------------------------
+
+/** @param {any} ext */
+async function synctex(ext) {
+  if (!process.env.VPDF_LATEX) {
+    console.log("integration: SyncTeX SKIPPED: pdflatex is not installed");
+    return;
+  }
+  const { chromium } = require("playwright-core");
+  const { buildProject } = require("../helpers/latex");
+  const latex = path.join(workspace, "latex");
+  const pdf = path.join(latex, "main.pdf");
+  const main = path.join(latex, "main.tex");
+  const chapter = path.join(latex, "chapters", "one.tex");
+  const { viewer } = ext.exports;
+  const real = fs.realpathSync(pdf);
+
+  // 1. Open the PDF; its SyncTeX data is parsed in the extension host.
+  await vscode.commands.executeCommand("vscode.open", vscode.Uri.file(pdf));
+  await waitFor(() => panelFor(pdf)?.pages === 2, "main.pdf loaded");
+  const data0 = await waitFor(() => viewer.synctex.peek(real), "SyncTeX data of main.pdf");
+  const panel = [...viewer.panels].find((p) => p.path === pdf);
+  const pdfColumn = panel.panel.viewColumn;
+
+  const browser = await chromium.connectOverCDP(`http://127.0.0.1:${process.env.VPDF_CDP_PORT}`);
+  try {
+    const found = await webviewFrame(browser, "/ 2");
+    const chrome = Number((process.versions.chrome || "999").split(".")[0]);
+    if (!found && chrome >= 130) throw new Error("no webview frame for main.pdf");
+    if (!found) console.log(`integration: SyncTeX mouse steps SKIPPED: the webview is not reachable over CDP here (Chromium ${chrome})`);
+    const page = found?.page;
+    const f = found?.frame;
+    await f?.waitForFunction(() => document.body.classList.contains("synctex"), null, { timeout: 15000 });
+
+    /** The client point of a SyncTeX point on a page of the webview. @param {number} pageNo @param {number} x @param {number} y */
+    const clientPoint = async (pageNo, x, y) => {
+      if (!f) throw new Error("no frame");
+      const div = f.locator(`.page[data-page-number='${pageNo}']`);
+      await div.scrollIntoViewIfNeeded();
+      const box = await div.boundingBox();
+      const g = await div.evaluate((el) => ({ l: el.clientLeft, t: el.clientTop, w: el.clientWidth }));
+      assert.ok(box);
+      const scale = g.w / 595.276; // A4
+      return { x: box.x + g.l + x * scale, y: box.y + g.t + y * scale };
+    };
+    /** Ctrl+click the middle of `file`:`line`'s first stretch; resolves with the line expected there. @param {any} data @param {string} file @param {number} line */
+    const ctrlClickLine = async (data, file, line) => {
+      const v = data.view(file, line);
+      assert.ok(v, `${file}:${line} in the SyncTeX data`);
+      const [l, t, r, b] = v.rects[0];
+      const sx = (l + r) / 2;
+      const sy = t + (b - t) * 0.6;
+      const expected = data.edit(v.page, sx, sy);
+      const at = await clientPoint(v.page, sx, sy);
+      await /** @type {any} */ (page).keyboard.down("Control");
+      await /** @type {any} */ (page).mouse.click(at.x, at.y);
+      await /** @type {any} */ (page).keyboard.up("Control");
+      return expected;
+    };
+
+    // 2. Ctrl+click on the \input file's text opens it at that line, beside the PDF.
+    if (f) {
+      const hit = await ctrlClickLine(data0, chapter, 2);
+      assert.deepEqual([hit.file, hit.line], [chapter, 2]);
+      const ed = await waitFor(() => {
+        const e = vscode.window.activeTextEditor;
+        return e && e.document.uri.fsPath === chapter && e.selection.active.line === 1 ? e : null;
+      }, "chapters/one.tex open at line 2");
+      assert.notEqual(ed.viewColumn, pdfColumn, "not in the PDF tab's group");
+      assert.ok(panel.panel.visible, "the PDF stays visible");
+    }
+
+    // 3. Forward search with the command, from a .tex editor at the cursor: page 2.
+    const doc = await vscode.workspace.openTextDocument(main);
+    const mainEd = await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Two });
+    mainEd.selection = new vscode.Selection(33, 3, 33, 3); // line 34: text on the second page
+    const e1 = await vscode.commands.executeCommand("vscodePdfMcp.synctexForward");
+    assert.deepEqual([/** @type {any} */ (e1)?.path, /** @type {any} */ (e1)?.page], [pdf, 2]);
+    await waitFor(() => panelFor(pdf)?.page === 2, "page 2 after the forward search");
+    assert.equal(vscode.window.activeTextEditor?.document.uri.fsPath, main, "the .tex editor keeps the focus");
+    if (f) await f.locator(".synctexFlash .bar").first().waitFor({ timeout: 5000 });
+
+    // 4. vscode-pdf-mcp-open, as LaTeX Workshop calls it: back to page 1 (\input file, line 3).
+    const cli = (/** @type {string[]} */ args) => new Promise((resolve) => {
+      execFile(process.execPath, [path.join(__dirname, "..", "..", "bin", "open.js"), ...args],
+        { env: { ...process.env, VSCODE_PDF_MCP_DIR: dir } }, (err, stdout, stderr) => resolve({ code: err ? err.code : 0, stdout, stderr }));
+    });
+    let out = /** @type {any} */ (await cli(["--tex", chapter, "--line", "3", pdf]));
+    assert.equal(out.code, 0, out.stderr);
+    assert.equal(out.stdout, `${pdf}: page 1 of 2\n`);
+    await waitFor(() => panelFor(pdf)?.page === 1, "page 1 after vscode-pdf-mcp-open --tex");
+    out = await cli([pdf]);
+    assert.equal(out.code, 0, out.stderr);
+    out = await cli(["--tex", path.join(latex, "nope.tex"), "--line", "3", pdf]);
+    assert.equal(out.code, 1);
+    assert.match(out.stderr, /is not in the SyncTeX data of/);
+
+    // 5. A selection: its source lines in the state file (C2 tex) and the hook (C7 Source).
+    if (f && page) {
+      const first = f.locator(".page[data-page-number='1'] .textLayer span").filter({ hasText: "This text comes" }).first();
+      const last = f.locator(".page[data-page-number='1'] .textLayer span").filter({ hasText: "line too" }).last();
+      await first.scrollIntoViewIfNeeded();
+      const a = await first.boundingBox();
+      const b = await last.boundingBox();
+      assert.ok(a && b);
+      await page.mouse.move(a.x + 1, a.y + a.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(b.x + b.width - 1, b.y + b.height / 2, { steps: 8 });
+      await page.mouse.up();
+      const sel = await waitFor(() => panelFor(pdf)?.selection?.tex && panelFor(pdf)?.selection, "a selection with tex");
+      assert.match(sel.text, /^This text comes from an input file\. It has a second source line too\.?$/);
+      assert.deepEqual(sel.tex, [{ file: chapter, lines: [2, 3] }]);
+      assert.deepEqual(backend.getSelection("primary", { dir }).tex, [{ file: chapter, lines: [2, 3] }]);
+    }
+    // the hook only speaks for the active editor: make the PDF tab active
+    panel.panel.reveal(panel.panel.viewColumn, false);
+    await waitFor(() => panelFor(pdf)?.active, "main.pdf active");
+    if (f) {
+      const hook = hookOutput({ cwd: workspace }, backend.readStates(dir));
+      assert.ok(hook);
+      assert.match(JSON.parse(hook).hookSpecificOutput.additionalContext, /\nSource: latex\/chapters\/one\.tex:2-3$/);
+    }
+
+    // 6. Rebuild with three lines more at the top of the \input file: the PDF reloads in
+    //    place and the SyncTeX data is refreshed (the same text is now line 5).
+    const before = panelFor(pdf);
+    buildProject(latex, { extraChapterLines: "% one\n% two\n% three" });
+    const data1 = await waitFor(() => {
+      const d = viewer.synctex.peek(real);
+      return d && d !== data0 && d.view(chapter, 5)?.page === 1 ? d : null;
+    }, "SyncTeX data refreshed after the rebuild");
+    assert.equal(data1.edit(1, ...mid(data1.view(chapter, 5).rects[0]))?.line, 5);
+    assert.deepEqual([panelFor(pdf)?.page, panelFor(pdf)?.pages], [before?.page, 2], "the view is kept");
+    if (f) {
+      const hit = await ctrlClickLine(data1, chapter, 5);
+      assert.equal(hit.line, 5);
+      await waitFor(() => {
+        const e = vscode.window.activeTextEditor;
+        return e && e.document.uri.fsPath === chapter && e.selection.active.line === 4;
+      }, "chapters/one.tex at line 5 after the rebuild");
+    }
+  } finally {
+    await browser.close().catch(() => {});
+  }
+}
+
+/** The middle of a rect, as [x, y]. @param {number[]} r @returns {[number, number]} */
+const mid = (r) => [(r[0] + r[2]) / 2, (r[1] + r[3]) / 2];
 
 module.exports = { run };

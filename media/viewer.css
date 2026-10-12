@@ -129,14 +129,14 @@ body.tool-note .page, body.tool-note .textLayer, body.tool-note .textLayer span 
 .vpdf-ui textarea:focus { outline: 1px solid var(--vscode-focusBorder, #0078d4); }
 
 #vpdfLayer { position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 30; }
-.miniBar, .popover, .noteEditor, .tip, .menu {
+.miniBar, .popover, .noteEditor, .tip, .menu, .synctexTip {
   position: absolute;
   background: var(--vscode-editorWidget-background, #f3f3f3);
   border: 1px solid var(--vscode-editorWidget-border, var(--vscode-widget-border, #c8c8c8));
   box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.3));
   border-radius: 4px;
 }
-.miniBar[hidden], .popover[hidden], .noteEditor[hidden], .tip[hidden], .menu[hidden] { display: none; }
+.miniBar[hidden], .popover[hidden], .noteEditor[hidden], .tip[hidden], .menu[hidden], .synctexTip[hidden] { display: none; }
 .miniBar {
   display: flex;
   flex-wrap: wrap;
@@ -241,3 +241,22 @@ body.finding #annotPanel { top: 64px; }
   border-color: var(--vscode-inputValidation-errorBorder, #c00);
 }
 #status[hidden] { display: none; }
+
+/* ---- SyncTeX (synctex.mjs): Ctrl+hover underline and tip, forward-search flash ------- */
+
+#synctexLayer { position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 29; pointer-events: none; }
+#synctexLayer .bar { position: absolute; box-sizing: border-box; pointer-events: none; }
+.synctexHover .bar { border-bottom: 2px solid rgba(96, 96, 96, 0.85); }
+.synctexFlash .bar { background: rgba(128, 128, 128, 0.25); border-bottom: 2px solid rgba(96, 96, 96, 0.9); }
+.synctexFlash.fading .bar { animation: synctex-fade 1.5s ease-in forwards; }
+@keyframes synctex-fade { 0%, 60% { opacity: 1; } 100% { opacity: 0; } }
+.synctexTip { padding: 3px 8px; max-width: 560px; pointer-events: none; z-index: 31; }
+.synctexTip .synctexWhere { font-weight: 600; }
+.synctexTip .synctexLine {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.92em;
+  opacity: 0.85;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+body.synctex-hover .page, body.synctex-hover .textLayer, body.synctex-hover .textLayer span { cursor: pointer; }

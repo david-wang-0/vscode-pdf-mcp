@@ -4,8 +4,10 @@
  * window (extension host) publishes `<pid>.json` and serves `<pid>.sock` in the runtime
  * directory, so the MCP server and the hook can see what the user is reading and the
  * server can `goto`. The user's marks are written through pdf-reader-writer-mcp's edit
- * service (`Marking` below). Everything vscode-free lives in state.js, ipc.js, html.js,
- * editservice.js, marks.js and lib/.
+ * service (`Marking` below). SyncTeX (Ctrl+hover, Ctrl+click, forward search, the
+ * selection's source lines) is parsed in-process by synctexstore.js and lib/synctex.js.
+ * Everything vscode-free lives in state.js, ipc.js, html.js, editservice.js, marks.js,
+ * synctexstore.js and lib/.
  */
 "use strict";
 
@@ -17,6 +19,7 @@ const { spawn } = require("node:child_process");
 const { StateStore } = require("./state");
 const { EditService } = require("./editservice");
 const { MarkController } = require("./marks");
+const { SynctexStore, pdfCandidatesForTex, sourceLine } = require("./synctexstore");
 const ipc = require("./ipc");
 const { renderHtml, nonce } = require("./html");
 const { stateDir } = require("../lib/runtime");
@@ -77,6 +80,8 @@ class PdfPanel {
     this.reqSeq = 0;
     /** @type {Map<number, (page: number) => void>} */
     this.gotoWaiters = new Map();
+    /** The webview's last selection, with its rects for SyncTeX. @type {any} */
+    this.selection = null;
     /** @type {(() => void) | null} */
     this.resolveLoaded = null;
     /** @type {((e: Error) => void) | null} */
@@ -102,6 +107,7 @@ class PdfPanel {
 
     owner.store.addPanel(id, this.path);
     owner.store.updatePanel(id, { active: panel.active });
+    owner.synctex.watch(this.realPath);
     const subs = [
       webview.onDidReceiveMessage((m) => this.onMessage(m)),
       panel.onDidChangeViewState((e) => {
@@ -114,6 +120,7 @@ class PdfPanel {
       subs.forEach((s) => s.dispose());
       this.watcher?.close();
       clearTimeout(this.reloadTimer);
+      owner.synctex.unwatch(this.realPath);
       this.rejectLoaded?.(new Error(`the tab for ${this.path} was closed`));
       owner.removePanel(this);
     });
@@ -129,6 +136,7 @@ class PdfPanel {
         void this.panel.webview.postMessage({ type: "visibility", visible: this.panel.visible });
         void this.sendFile(false);
         void this.owner.marking.sendState(this);
+        this.postSynctex();
         break;
       case "loaded":
         this.pages = m.pages;
@@ -137,6 +145,8 @@ class PdfPanel {
         this.resolveLoaded?.();
         if (m.reload) trace(`reloaded ${this.path} (${m.pages} pages, at page ${m.page})`);
         void this.owner.marking.sendList(this);
+        // a rebuild replaces the PDF and its synctex file: make sure the data is current
+        void this.owner.synctex.refresh(this.realPath);
         break;
       case "mark":
       case "note":
@@ -158,7 +168,14 @@ class PdfPanel {
         store.updatePanel(this.id, { page: m.page });
         break;
       case "selection":
-        store.updatePanel(this.id, { selection: m.selection || null });
+        this.selection = m.selection && typeof m.selection === "object" ? m.selection : null;
+        this.publishSelection();
+        break;
+      case "synctexHover":
+        this.owner.synctexHover(this, m);
+        break;
+      case "synctexEdit":
+        void this.owner.synctexEdit(this, m);
         break;
       case "gotoDone": {
         const done = this.gotoWaiters.get(m.reqId);
@@ -207,6 +224,53 @@ class PdfPanel {
   /** @param {any} msg */
   post(msg) {
     if (!this.disposed) void this.panel.webview.postMessage(msg);
+  }
+
+  /** Tell the webview whether this PDF has SyncTeX data. */
+  postSynctex() {
+    this.post({ type: "synctex", available: !!this.owner.synctex.peek(this.realPath) });
+  }
+
+  /**
+   * Publish the selection to the state file, with its SyncTeX source lines (CONTRACT C2
+   * `tex`) when the PDF has SyncTeX data and the webview sent the selection's rects.
+   */
+  publishSelection() {
+    const s = this.selection;
+    if (!s || typeof s.text !== "string" || !s.text || !Number.isInteger(s.page)) {
+      this.owner.store.updatePanel(this.id, { selection: null });
+      return;
+    }
+    /** @type {import("../lib/backend").PanelSelection} */
+    const sel = { text: s.text, page: s.page };
+    const data = this.owner.synctex.peek(this.realPath);
+    if (data && Array.isArray(s.parts)) {
+      try {
+        const tex = data.sourceOfSelection(s.parts);
+        if (tex.length) sel.tex = tex;
+      } catch (e) {
+        trace(`SyncTeX selection on ${this.path}: ${e instanceof Error ? e.message : e}`);
+      }
+    }
+    this.owner.store.updatePanel(this.id, { selection: sel });
+  }
+
+  /**
+   * Show `page` and flash `rects` (SyncTeX boxes, bp from the page's top-left) for a
+   * moment; returns the entry after the move.
+   * @param {number} page @param {number[][]} rects
+   */
+  async flash(page, rects) {
+    await withTimeout(this.loaded, OPEN_TIMEOUT_MS, `loading ${this.path}`);
+    if (page < 1 || page > this.pages) throw new Error(`page ${page} outside 1-${this.pages}`);
+    this.panel.reveal(this.panel.viewColumn, true);
+    const reqId = ++this.reqSeq;
+    const done = new Promise((resolve) => this.gotoWaiters.set(reqId, resolve));
+    await this.panel.webview.postMessage({ type: "synctexShow", page, rects, reqId });
+    const shown = await withTimeout(done, 5000, "SyncTeX forward search");
+    this.page = /** @type {number} */ (shown);
+    this.owner.store.updatePanel(this.id, { page: this.page });
+    return this.entry();
   }
 
   /**
@@ -280,6 +344,16 @@ class Viewer {
     /** @type {Map<string, Set<(p: PdfPanel) => void>>} realpath -> waiters */
     this.panelWaiters = new Map();
     this.marking = new Marking(this);
+    this.synctex = new SynctexStore({
+      log: trace,
+      onChange: (pdf) => {
+        for (const p of this.panels) {
+          if (p.realPath !== pdf) continue;
+          p.postSynctex();
+          p.publishSelection();
+        }
+      },
+    });
   }
 
   /** Reload every tab that shows `real` (a realpath) now. @param {string} real */
@@ -342,6 +416,98 @@ class Viewer {
     return p.goto(page);
   }
 
+  /**
+   * Open `file` in a tab (beside the active editor, keeping the focus) or reveal the tab
+   * that has it, and wait until pdf.js has loaded it.
+   * @param {string} file
+   */
+  async open(file) {
+    let p = this.pick(file);
+    if (p) {
+      p.panel.reveal(p.panel.viewColumn, true);
+    } else {
+      if (!fs.existsSync(file)) throw new Error(`no such file: ${file}`);
+      const created = this.waitForPanel(realPath(file));
+      await vscode.commands.executeCommand("vscode.openWith", vscode.Uri.file(file), VIEW_TYPE,
+        { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true });
+      p = await withTimeout(created, OPEN_TIMEOUT_MS, `opening ${file}`);
+    }
+    await withTimeout(p.loaded, OPEN_TIMEOUT_MS, `loading ${file}`);
+    return p;
+  }
+
+  // ---- SyncTeX -------------------------------------------------------------------------
+
+  /** Ctrl+hover: what Ctrl+click would open, and the boxes to underline. @param {PdfPanel} panel @param {any} m */
+  synctexHover(panel, m) {
+    const data = this.synctex.peek(panel.realPath);
+    /** @type {any} */
+    let hit = null;
+    if (data && Number.isInteger(m.page) && Number.isFinite(m.x) && Number.isFinite(m.y)) {
+      const r = data.edit(m.page, m.x, m.y);
+      if (r && r.file) {
+        hit = { file: r.file, rel: vscode.workspace.asRelativePath(r.file, false), line: r.line, column: r.column,
+          text: sourceLine(r.file, r.line), rects: r.rects };
+      }
+    }
+    panel.post({ type: "synctexHit", reqId: m.reqId, hit });
+  }
+
+  /** Ctrl+click: inverse search, open the source at the line. @param {PdfPanel} panel @param {any} m */
+  async synctexEdit(panel, m) {
+    if (!Number.isInteger(m.page) || !Number.isFinite(m.x) || !Number.isFinite(m.y)) return;
+    const data = this.synctex.peek(panel.realPath) || await this.synctex.get(panel.realPath);
+    const r = data?.edit(m.page, m.x, m.y);
+    if (!r || !r.file) return;
+    trace(`SyncTeX: ${panel.path} page ${m.page} -> ${r.file}:${r.line}`);
+    try {
+      await openSource(r.file, r.line, r.column, panel);
+    } catch (e) {
+      void vscode.window.showWarningMessage(`SyncTeX: cannot open ${r.file}: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  /**
+   * The PDF a forward search from `tex` goes to: an open tab whose SyncTeX data has the
+   * file (the active one first), else `<root>.pdf` of its `% !TEX root` magic comment,
+   * else the PDF of the same base name.
+   * @param {string} tex
+   */
+  async pdfForTex(tex) {
+    const lastActive = (/** @type {PdfPanel} */ p) => this.store.panels.get(p.id)?.lastActiveAt ?? 0;
+    const panels = [...this.panels].sort((a, b) => Number(b.panel.active) - Number(a.panel.active) || lastActive(b) - lastActive(a));
+    for (const p of panels) {
+      const data = this.synctex.peek(p.realPath) || await this.synctex.get(p.realPath);
+      if (data && data.covers(tex)) return p.path;
+    }
+    const candidates = pdfCandidatesForTex(tex);
+    const found = candidates.find((c) => fs.existsSync(c));
+    if (found) return found;
+    throw new Error(`no PDF for ${tex}: no open PDF has it in its SyncTeX data, and ${candidates.join(" and ")} do not exist`);
+  }
+
+  /**
+   * Forward search: show `line` of `tex` in its PDF (`pdf`, else found by `pdfForTex`),
+   * opening the PDF if needed, and flash its boxes. Returns the entry.
+   * @param {unknown} tex @param {unknown} line @param {unknown} column @param {unknown} pdf
+   */
+  async synctexForward(tex, line, column, pdf) {
+    if (typeof tex !== "string" || !tex) throw new Error("tex must be the path of a source file");
+    if (!Number.isInteger(line) || /** @type {number} */ (line) < 1) throw new Error(`line must be a positive integer, got ${line}`);
+    void column; // pdfTeX, XeTeX and LuaTeX record no columns
+    const source = path.resolve(tex);
+    const target = typeof pdf === "string" && pdf ? path.resolve(pdf) : await this.pdfForTex(source);
+    if (!fs.existsSync(target)) throw new Error(`no such file: ${target}`);
+    const data = await this.synctex.get(realPath(target));
+    if (!data) throw new Error(`no SyncTeX data for ${target} (no .synctex.gz or .synctex next to it; compile with -synctex=1)`);
+    const open = this.pick(target);
+    const hit = data.view(source, /** @type {number} */ (line), { pageHint: open?.page || 0 });
+    if (!hit) throw new Error(`${source} is not in the SyncTeX data of ${target}`);
+    trace(`SyncTeX: ${source}:${line} -> ${target} page ${hit.page}`);
+    const p = await this.open(target);
+    return p.flash(hit.page, hit.rects);
+  }
+
   /** Socket handler. @param {any} req */
   async handle(req) {
     switch (req.op) {
@@ -353,6 +519,12 @@ class Viewer {
         const file = typeof req.path === "string" && req.path ? path.resolve(req.path) : null;
         return { ok: true, entry: await this.goto(file, req.page) };
       }
+      case "open": {
+        if (typeof req.path !== "string" || !req.path) return { ok: false, error: "open needs a path" };
+        return { ok: true, entry: (await this.open(path.resolve(req.path))).entry() };
+      }
+      case "synctexForward":
+        return { ok: true, entry: await this.synctexForward(req.tex, req.line, req.column, req.pdf) };
       default:
         return { ok: false, error: `unknown op: ${req.op}` };
     }
@@ -512,6 +684,45 @@ class Marking {
   }
 }
 
+/**
+ * Open `file` at `line` (1-based) and `column` (0-based, if known) for an inverse
+ * search: in an editor that already shows it; else in a group with the file open in a
+ * tab; else in the group right of the PDF's, or the most recently used text group, or a
+ * new group beside the PDF. Never in the PDF tab's own group.
+ * @param {string} file @param {number} line @param {number | null} column @param {PdfPanel} pdf
+ */
+async function openSource(file, line, column, pdf) {
+  const real = realPath(file);
+  const same = (/** @type {vscode.Uri} */ u) => u.scheme === "file" && (u.fsPath === file || realPath(u.fsPath) === real);
+  const pdfColumn = pdf.panel.viewColumn;
+  /** @type {vscode.ViewColumn | undefined} */
+  let column0 = vscode.window.visibleTextEditors.find((e) => same(e.document.uri) && e.viewColumn !== undefined)?.viewColumn;
+  const groups = vscode.window.tabGroups.all;
+  if (column0 === undefined) {
+    column0 = groups.find((g) => g.viewColumn !== pdfColumn
+      && g.tabs.some((t) => t.input instanceof vscode.TabInputText && same(t.input.uri)))?.viewColumn;
+  }
+  if (column0 === undefined && pdfColumn !== undefined) {
+    column0 = groups.find((g) => g.viewColumn === pdfColumn + 1)?.viewColumn;
+  }
+  if (column0 === undefined && lastTextColumn !== undefined && lastTextColumn !== pdfColumn
+      && groups.some((g) => g.viewColumn === lastTextColumn)) {
+    column0 = lastTextColumn;
+  }
+  const pos = new vscode.Position(Math.max(0, line - 1), Math.max(0, column ?? 0));
+  const editor = await vscode.window.showTextDocument(vscode.Uri.file(file), {
+    viewColumn: column0 ?? vscode.ViewColumn.Beside,
+    selection: new vscode.Selection(pos, pos),
+    preserveFocus: false,
+    preview: false,
+  });
+  editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+  return editor;
+}
+
+/** The view column of the most recently active text editor. @type {vscode.ViewColumn | undefined} */
+let lastTextColumn;
+
 /** Open in pdf-external-open's editor if installed (it hands off to Okular), else spawn. */
 /** @param {vscode.Uri} uri */
 async function openExternalViewer(uri) {
@@ -584,6 +795,23 @@ async function activate(context) {
       const uri = arg instanceof vscode.Uri ? arg : viewer.pick(null)?.uri;
       if (uri) return openExternalViewer(uri);
     }),
+    vscode.commands.registerCommand("vscodePdfMcp.synctexForward", async () => {
+      const ed = vscode.window.activeTextEditor;
+      if (!ed || ed.document.uri.scheme !== "file") {
+        void vscode.window.showWarningMessage("SyncTeX: show in PDF needs a .tex file in the active editor");
+        return undefined;
+      }
+      const pos = ed.selection.active;
+      try {
+        return await viewer.synctexForward(ed.document.uri.fsPath, pos.line + 1, pos.character, undefined);
+      } catch (e) {
+        void vscode.window.showWarningMessage(`SyncTeX: ${e instanceof Error ? e.message : e}`);
+        return undefined;
+      }
+    }),
+    vscode.window.onDidChangeActiveTextEditor((e) => {
+      if (e && e.viewColumn !== undefined) lastTextColumn = e.viewColumn;
+    }),
     vscode.workspace.onDidChangeConfiguration((e) => {
       const affects = (/** @type {string} */ k) => e.affectsConfiguration(`vscodePdfMcp.${k}`);
       if (affects("editCommand") || affects("editArgs")) viewer.marking.reset();
@@ -592,7 +820,9 @@ async function activate(context) {
       }
     }),
     { dispose: () => viewer.marking.dispose() },
+    { dispose: () => viewer.synctex.dispose() },
   );
+  if (vscode.window.activeTextEditor?.viewColumn !== undefined) lastTextColumn = vscode.window.activeTextEditor.viewColumn;
 
   /** @type {import("node:net").Server | null} */
   let server = null;

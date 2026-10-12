@@ -43,6 +43,7 @@ if (!process.env.VPDF_UNDER_XVFB) {
 
 const { runTests } = require("@vscode/test-electron");
 const { samplePdf } = require("../helpers/pdf");
+const { HAVE_PDFLATEX, buildProject } = require("../helpers/latex");
 
 /** A free TCP port on 127.0.0.1. @returns {Promise<number>} */
 function freePort() {
@@ -75,6 +76,8 @@ async function main() {
   fs.writeFileSync(path.join(workspace, "paper.pdf"), samplePdf(5));
   fs.writeFileSync(path.join(workspace, "other.pdf"), samplePdf(2, "other"));
   fs.writeFileSync(path.join(workspace, "broken.pdf"), "%PDF-1.4\nthis is not a PDF\n");
+  // SyncTeX: a multi-file LaTeX project compiled with pdflatex -synctex=1 (skipped without pdflatex)
+  if (HAVE_PDFLATEX) buildProject(path.join(workspace, "latex"));
   const fake = path.join(tmp, "fake-okular");
   fs.writeFileSync(fake, `#!/bin/sh\nprintf '%s\\n' "$@" > '${path.join(tmp, "fake-okular.log")}'\n`, { mode: 0o755 });
   try {
@@ -102,6 +105,7 @@ async function main() {
         VSCODE_PDF_MCP_EDIT_COMMAND: editCommand,
         VPDF_PRW_MCP: mcpCommand,
         VPDF_PYTHON: process.env.VPDF_PYTHON || "",
+        VPDF_LATEX: HAVE_PDFLATEX ? "1" : "",
       },
     });
     const left = fs.readdirSync(stateDir);

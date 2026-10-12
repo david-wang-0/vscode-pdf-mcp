@@ -6,14 +6,18 @@
  * `goto`.
  *
  * Messages to the extension: ready, loaded {pages, page, reload}, loadError {message,
- * reload}, page {page}, selection {selection: {text, page} | null}, gotoDone {reqId, page},
- * openLink {url}, openExternalViewer, and the marking messages of annotate.mjs.
- * Messages from the extension: load {data, reload}, goto {page, reqId}, visibility
- * {visible}, and the marking messages of annotate.mjs.
+ * reload}, page {page}, selection {selection: {text, page, parts?} | null} (`parts`: the
+ * selection's SyncTeX rects per page, when the PDF has SyncTeX data), gotoDone {reqId,
+ * page}, openLink {url}, openExternalViewer, and the messages of annotate.mjs and
+ * synctex.mjs.
+ * Messages from the extension: load {data, reload}, goto {page, reqId}, synctexShow
+ * {page, rects, reqId} (a forward search: goto plus a flash; answered with gotoDone),
+ * visibility {visible}, and the messages of annotate.mjs and synctex.mjs.
  */
 
 import { normaliseSelection } from "./textnorm.mjs";
 import { setupMarking } from "./annotate.mjs";
+import { setupSynctex } from "./synctex.mjs";
 
 // @ts-ignore provided by VS Code (or the development harness)
 const vscode = acquireVsCodeApi();
@@ -97,6 +101,8 @@ let lastView = null;
 let deferred = null;
 /** A goto received while hidden, re-applied when shown. @type {number | null} */
 let pendingPage = null;
+/** A forward search's flash received before the pages could show it. @type {{page: number, rects: number[][]} | null} */
+let pendingFlash = null;
 
 /** Whether VS Code shows this tab (told by the extension); a hidden tab may still have a layout. */
 let panelVisible = true;
@@ -107,6 +113,13 @@ function onShown() {
   if (!isVisible()) return;
   if (deferred) {
     showDeferred();
+    return;
+  }
+  if (pendingFlash) {
+    const f = pendingFlash;
+    pendingFlash = null;
+    pendingPage = null;
+    synctex.flash(f.page, f.rects);
     return;
   }
   if (pendingPage !== null) {
@@ -246,6 +259,7 @@ eventBus.on("pagesinit", () => {
   lastView = captureView() || lastView;
   post({ type: "loaded", pages: pdfViewer.pagesCount, page: pdfViewer.currentPageNumber, reload: isReload });
   if (!findbar.hidden && findInput.value) find("", false);
+  if (pendingFlash) requestAnimationFrame(onShown);
 });
 
 eventBus.on("pagechanging", (/** @type {{pageNumber: number}} */ { pageNumber }) => {
@@ -299,6 +313,8 @@ $("openExternal").addEventListener("click", () => post({ type: "openExternalView
 // External links go through the extension (vscode.env.openExternal); internal links
 // (citations, sections) are handled by pdf.js's link service.
 container.addEventListener("click", (e) => {
+  // Ctrl+click is SyncTeX's (synctex.mjs) when the PDF has SyncTeX data
+  if ((e.ctrlKey || e.metaKey) && synctex.available()) return;
   const a = /** @type {HTMLElement | null} */ (e.target instanceof Element ? e.target.closest("a[href]") : null);
   if (!a) return;
   const href = a.getAttribute("href") || "";
@@ -380,13 +396,17 @@ function pageOf(node) {
 
 function reportSelection() {
   const sel = window.getSelection();
-  /** @type {{text: string, page: number} | null} */
+  /** @type {{text: string, page: number, parts?: {page: number, rects: number[][]}[]} | null} */
   let value = null;
   if (sel && !sel.isCollapsed && sel.rangeCount) {
     const range = sel.getRangeAt(0);
     const page = pageOf(range.startContainer) ?? pageOf(sel.anchorNode) ?? pageOf(sel.focusNode);
     const text = normaliseSelection(sel.toString());
-    if (page && text) value = { text, page };
+    if (page && text) {
+      value = { text, page };
+      const parts = synctex.selectionParts();
+      if (parts && parts.length) value.parts = parts;
+    }
   }
   const key = JSON.stringify(value);
   if (key === lastPosted) return;
@@ -404,30 +424,47 @@ document.addEventListener("selectionchange", () => {
 
 const marking = setupMarking({ pdfViewer, eventBus, container, post, getDocument: () => pdfDocument, vscode });
 
+// ---- SyncTeX (synctex.mjs) ---------------------------------------------------------------
+
+const synctex = setupSynctex({ pdfViewer, eventBus, container, post });
+// SyncTeX data arrived (or went): publish the selection again, with (or without) its rects
+synctex.onAvailabilityChange(() => {
+  lastPosted = "";
+  reportSelection();
+});
+
 // ---- messages from the extension -----------------------------------------------------
 
 handle = (msg) => {
   if (!msg || typeof msg !== "object") return;
   if (marking.handle(msg)) return;
+  if (synctex.handle(msg)) return;
   if (msg.type === "load") {
     void load(msg.data instanceof Uint8Array ? msg.data : new Uint8Array(msg.data), !!msg.reload);
   } else if (msg.type === "visibility") {
     if (!msg.visible && panelVisible && !deferred && !restoreView) lastView = captureView() || lastView;
     panelVisible = !!msg.visible;
     if (panelVisible) requestAnimationFrame(onShown);
-  } else if (msg.type === "goto") {
+  } else if (msg.type === "goto" || msg.type === "synctexShow") {
+    const forward = msg.type === "synctexShow";
     showDeferred();
     if (deferred || restoreView) {
       // Not laid out yet (hidden, or pages still initialising): go there when it is.
       const v = { page: msg.page, ratio: 0, left: 0, scale: (restoreView || lastView)?.scale || "page-width" };
       if (restoreView) restoreView = v;
       else lastView = v;
+      if (forward) pendingFlash = { page: msg.page, rects: msg.rects };
       post({ type: "gotoDone", reqId: msg.reqId, page: msg.page });
       return;
     }
     if (pdfDocument && msg.page >= 1 && msg.page <= pdfViewer.pagesCount) {
-      pdfViewer.currentPageNumber = msg.page;
-      if (!isVisible()) pendingPage = msg.page; // scroll again once there is a layout
+      if (forward && isVisible()) synctex.flash(msg.page, msg.rects);
+      else pdfViewer.currentPageNumber = msg.page;
+      if (!isVisible()) {
+        // scroll again (and flash) once there is a layout
+        pendingPage = msg.page;
+        if (forward) pendingFlash = { page: msg.page, rects: msg.rects };
+      }
       lastView = captureView() || { page: msg.page, ratio: 0, left: 0, scale: lastView?.scale || "page-width" };
     }
     post({ type: "gotoDone", reqId: msg.reqId, page: pdfViewer.currentPageNumber });

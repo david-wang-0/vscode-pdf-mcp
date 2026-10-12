@@ -628,3 +628,201 @@ test("side panel: every annotation by page with nested replies and marked text; 
   assert.deepEqual(errors, []);
   await page.close();
 });
+
+// ---- SyncTeX -------------------------------------------------------------------------
+
+/** samplePdf line `k` (0-based) as a SyncTeX rect: Helvetica 12 from x = 72, baseline 720 - 14 k, page height 792. @param {number} k @param {number} [x1] */
+const lineRect = (k, x1 = 380) => [72, 792 - (720 - 14 * k) - 9, x1, 792 - (720 - 14 * k) + 3];
+
+/**
+ * Answer the latest synctexHover as the extension would.
+ * @param {import("playwright-core").Page} page @param {any} hit
+ */
+async function answerHover(page, hit) {
+  await posted(page, { type: "synctexHover" });
+  await page.evaluate((h) => {
+    const w = /** @type {any} */ (window);
+    const m = [...w.__posted].reverse().find((/** @type {any} */ x) => x.type === "synctexHover");
+    w.__send({ type: "synctexHit", reqId: m.reqId, hit: h });
+  }, hit);
+}
+
+test("SyncTeX: Ctrl+hover shows a grey underline and a file:line tip from the extension's answer; releasing Ctrl removes them", async () => {
+  const pdf = path.join(tmp, "stx-hover.pdf");
+  fs.writeFileSync(pdf, samplePdf(3));
+  const { page, errors } = await open(await serve(pdf));
+  const span = page.locator(".page[data-page-number='1'] .textLayer span").filter({ hasText: "Reachability of timed automata" }).first();
+  const b = await span.boundingBox();
+  assert.ok(b);
+  const at = { x: b.x + 40, y: b.y + b.height / 2 };
+
+  // without SyncTeX data, Ctrl+hover asks nothing
+  let mark = await count(page);
+  await page.mouse.move(at.x, at.y);
+  await page.keyboard.down("Control");
+  await page.mouse.move(at.x + 2, at.y);
+  await page.waitForTimeout(150);
+  assert.equal(await page.evaluate((from) => /** @type {any} */ (window).__posted.slice(from).filter((/** @type {any} */ m) => m.type === "synctexHover").length, mark), 0);
+  await page.keyboard.up("Control");
+
+  await page.evaluate(() => /** @type {any} */ (window).__send({ type: "synctex", available: true }));
+  mark = await count(page);
+  await page.keyboard.down("Control");
+  await page.mouse.move(at.x + 4, at.y);
+  const req = /** @type {any} */ (await posted(page, { type: "synctexHover" }, mark));
+  assert.equal(req.page, 1);
+  // SyncTeX space: big points from the page's top-left; the line's baseline is 100 bp down
+  const { scale } = await pageBox(page);
+  assert.ok(Math.abs(req.y - 97) < 6, `y ${req.y}`);
+  assert.ok(Math.abs(req.x - (72 + 44 / scale)) < 3, `x ${req.x}`);
+  await answerHover(page, { file: "/proj/main.tex", rel: "main.tex", line: 12, column: null,
+    text: "Reachability of timed automata is decidable via regions.", rects: [lineRect(2)] });
+  const bar = page.locator(".synctexHover .bar");
+  await bar.first().waitFor();
+  assert.equal(await bar.count(), 1);
+  const bb = await bar.first().boundingBox();
+  assert.ok(bb && Math.abs(bb.x - b.x) < 3 && bb.y < at.y && bb.y + bb.height > at.y, `bar ${JSON.stringify(bb)} under the text ${JSON.stringify(b)}`);
+  assert.match(await bar.first().evaluate((e) => getComputedStyle(e).borderBottomColor), /^rgba?\(96, 96, 96/, "grey");
+  const tip = page.locator(".synctexTip:visible");
+  await tip.waitFor();
+  assert.equal(await tip.locator(".synctexWhere").textContent(), "main.tex:12");
+  assert.equal(await tip.locator(".synctexLine").textContent(), "Reachability of timed automata is decidable via regions.");
+  assert.equal(await bar.first().evaluate((e) => getComputedStyle(e).pointerEvents), "none", "the underline lets the pointer through");
+
+  // releasing Ctrl removes both; a late answer to an old request shows nothing
+  await page.keyboard.up("Control");
+  await bar.first().waitFor({ state: "detached" });
+  assert.ok(await page.locator(".synctexTip").isHidden());
+  await page.evaluate((r) => {
+    const w = /** @type {any} */ (window);
+    const m = [...w.__posted].reverse().find((/** @type {any} */ x) => x.type === "synctexHover");
+    w.__send({ type: "synctexHit", reqId: m.reqId, hit: { file: "/a.tex", rel: "a.tex", line: 1, column: null, text: "", rects: [r] } });
+  }, lineRect(2));
+  await page.waitForTimeout(100);
+  assert.equal(await bar.count(), 0);
+
+  // leaving the page hides too
+  mark = await count(page);
+  await page.keyboard.down("Control");
+  await page.mouse.move(at.x + 6, at.y);
+  await posted(page, { type: "synctexHover" }, mark);
+  await answerHover(page, { file: "/proj/main.tex", rel: "main.tex", line: 12, column: null, text: "", rects: [lineRect(2)] });
+  await bar.first().waitFor();
+  await page.mouse.move(2, 2); // the toolbar, outside the viewer
+  await bar.first().waitFor({ state: "detached" });
+  await page.keyboard.up("Control");
+
+  // the underline does not get in the way of a plain selection
+  mark = await count(page);
+  await selectSpan(page, 1, "Filler line 6 on page 1");
+  const sel = /** @type {any} */ (await posted(page, { type: "selection", selection: "*" }, mark));
+  assert.equal(sel.selection.text, "Filler line 6 on page 1.");
+  // with SyncTeX data the selection carries its rects in SyncTeX space
+  assert.equal(sel.selection.parts.length, 1);
+  assert.equal(sel.selection.parts[0].page, 1);
+  const [l, t, r, bt] = sel.selection.parts[0].rects[0];
+  const base = 792 - (720 - 14 * 11);
+  assert.ok(Math.abs(l - 72) < 2 && t < base && bt > base - 3 && r > l, `rect ${sel.selection.parts[0].rects[0]}`);
+
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test("SyncTeX: Ctrl+click posts the inverse search, also on a link (which it does not follow); without data it does nothing special", async () => {
+  const pdf = path.join(tmp, "stx-click.pdf");
+  fs.writeFileSync(pdf, samplePdf(3));
+  const { page, errors } = await open(await serve(pdf));
+  await enableMarking(page);
+  await page.evaluate(() => /** @type {any} */ (window).__send({ type: "synctex", available: true }));
+  const span = page.locator(".page[data-page-number='1'] .textLayer span").filter({ hasText: "Filler line 4 on page 1" }).first();
+  const b = await span.boundingBox();
+  assert.ok(b);
+  let mark = await count(page);
+  await page.keyboard.down("Control");
+  await page.mouse.click(b.x + 10, b.y + b.height / 2);
+  await page.keyboard.up("Control");
+  const edit = /** @type {any} */ (await posted(page, { type: "synctexEdit" }, mark));
+  assert.equal(edit.page, 1);
+  assert.ok(Math.abs(edit.y - (792 - (720 - 14 * 9)) + 3) < 6, `y ${edit.y}`);
+  await page.waitForTimeout(100);
+  assert.ok(await page.locator(".miniBar").isHidden(), "no mini-bar, no selection");
+  assert.equal(await page.evaluate(() => window.getSelection()?.toString() || ""), "");
+
+  // the internal link on page 1 (to page 3): Ctrl+click is SyncTeX, not the link
+  const link = await page.locator(".annotationLayer .linkAnnotation a").first().boundingBox();
+  assert.ok(link);
+  mark = await count(page);
+  await page.keyboard.down("Control");
+  await page.mouse.click(link.x + 5, link.y + link.height / 2);
+  await page.keyboard.up("Control");
+  await posted(page, { type: "synctexEdit" }, mark);
+  await page.waitForTimeout(150);
+  assert.equal(await page.inputValue("#pageNumber"), "1", "the link was not followed");
+  // a plain click still follows it
+  await page.mouse.click(link.x + 5, link.y + link.height / 2);
+  await page.waitForFunction(() => /** @type {HTMLInputElement} */ (document.getElementById("pageNumber")).value === "3");
+
+  // without SyncTeX data, Ctrl+click is a click
+  await page.evaluate(() => /** @type {any} */ (window).__send({ type: "synctex", available: false }));
+  await page.evaluate(() => /** @type {any} */ (window).__send({ type: "goto", page: 1, reqId: 2 }));
+  await page.waitForFunction(() => /** @type {HTMLInputElement} */ (document.getElementById("pageNumber")).value === "1");
+  const link2 = await page.locator(".annotationLayer .linkAnnotation a").first().boundingBox();
+  assert.ok(link2);
+  mark = await count(page);
+  await page.keyboard.down("Control");
+  await page.mouse.click(link2.x + 5, link2.y + link2.height / 2);
+  await page.keyboard.up("Control");
+  await page.waitForTimeout(150);
+  assert.equal(await page.evaluate((from) => /** @type {any} */ (window).__posted.slice(from).filter((/** @type {any} */ m) => m.type === "synctexEdit").length, mark), 0);
+
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test("SyncTeX: a forward search scrolls to the place, flashes it, then the flash clears", async () => {
+  const pdf = path.join(tmp, "stx-flash.pdf");
+  fs.writeFileSync(pdf, samplePdf(4));
+  const { page, errors } = await open(await serve(pdf));
+  await page.evaluate(() => /** @type {any} */ (window).__send({ type: "synctex", available: true }));
+  const mark = await count(page);
+  await page.evaluate((r) => /** @type {any} */ (window).__send({ type: "synctexShow", page: 3, rects: [r], reqId: 9 }), lineRect(20));
+  assert.deepEqual(await posted(page, { type: "gotoDone" }, mark), { type: "gotoDone", reqId: 9, page: 3 });
+  const bar = page.locator(".synctexFlash .bar");
+  await bar.first().waitFor();
+  const bb = await bar.first().boundingBox();
+  const vc = await page.locator("#viewerContainer").boundingBox();
+  const span = await page.locator(".page[data-page-number='3'] .textLayer span").filter({ hasText: "Filler line 15 on page 3" }).first().boundingBox();
+  assert.ok(bb && vc && span);
+  assert.ok(bb.y >= vc.y && bb.y + bb.height <= vc.y + vc.height, "the flash is in view");
+  assert.ok(Math.abs(bb.y + bb.height / 2 - (span.y + span.height / 2)) < span.height, `flash ${JSON.stringify(bb)} on the line ${JSON.stringify(span)}`);
+  assert.equal(await page.inputValue("#pageNumber"), "3");
+  await bar.first().waitFor({ state: "detached", timeout: 4000 });
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test("SyncTeX: Ctrl+wheel still zooms, and hides the underline during the gesture", async () => {
+  const pdf = path.join(tmp, "stx-zoom.pdf");
+  fs.writeFileSync(pdf, samplePdf(3));
+  const { page, errors } = await open(await serve(pdf));
+  await page.evaluate(() => /** @type {any} */ (window).__send({ type: "synctex", available: true }));
+  const zoom = async () => parseInt((await page.textContent("#zoomValue")) || "", 10);
+  const span = page.locator(".page[data-page-number='1'] .textLayer span").filter({ hasText: "Reachability" }).first();
+  const b = await span.boundingBox();
+  assert.ok(b);
+  const mark = await count(page);
+  await page.mouse.move(b.x + 20, b.y + b.height / 2);
+  await page.keyboard.down("Control");
+  await page.mouse.move(b.x + 22, b.y + b.height / 2);
+  await posted(page, { type: "synctexHover" }, mark);
+  await answerHover(page, { file: "/p/a.tex", rel: "a.tex", line: 3, column: null, text: "", rects: [lineRect(2)] });
+  await page.locator(".synctexHover .bar").first().waitFor();
+  const before = await zoom();
+  await page.mouse.wheel(0, -200);
+  await page.locator(".synctexHover .bar").first().waitFor({ state: "detached" });
+  await page.waitForFunction((z) => parseInt(document.getElementById("zoomValue")?.textContent || "", 10) > z, before);
+  await page.keyboard.up("Control");
+  assert.ok((await zoom()) > before);
+  assert.deepEqual(errors, []);
+  await page.close();
+});

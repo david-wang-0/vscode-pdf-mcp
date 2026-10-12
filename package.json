@@ -50,6 +50,11 @@
         "title": "Open in Okular",
         "category": "PDF",
         "icon": "$(link-external)"
+      },
+      {
+        "command": "vscodePdfMcp.synctexForward",
+        "title": "show in PDF",
+        "category": "SyncTeX"
       }
     ],
     "menus": {
@@ -64,6 +69,10 @@
         {
           "command": "vscodePdfMcp.openExternal",
           "when": "activeCustomEditorId == vscodePdfMcp.viewer"
+        },
+        {
+          "command": "vscodePdfMcp.synctexForward",
+          "when": "editorLangId == latex || editorLangId == tex || editorLangId == doctex || resourceExtname == .tex"
         }
       ]
     },
