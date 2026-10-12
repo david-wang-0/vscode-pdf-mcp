@@ -124,7 +124,8 @@
   },
   "bin": {
     "vscode-pdf-mcp": "mcp/server.js",
-    "vscode-pdf-mcp-hook": "bin/hook.js"
+    "vscode-pdf-mcp-hook": "bin/hook.js",
+    "vscode-pdf-mcp-open": "bin/open.js"
   },
   "scripts": {
     "test": "node --test test/*.test.js",
