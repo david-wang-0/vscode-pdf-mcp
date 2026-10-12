@@ -1,0 +1,77 @@
+/* Chrome follows the VS Code theme; pages stay white (pdf.js default). */
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--vscode-editor-background, #ddd);
+  color: var(--vscode-foreground, #222);
+  font-family: var(--vscode-font-family, sans-serif);
+  font-size: var(--vscode-font-size, 13px);
+}
+
+#toolbar, #findbar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 8px;
+  box-sizing: border-box;
+  background: var(--vscode-editorWidget-background, #f3f3f3);
+  border-bottom: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border, #ccc));
+  z-index: 10;
+}
+#toolbar { top: 0; height: 32px; }
+#findbar { top: 32px; height: 32px; }
+#findbar[hidden] { display: none; }
+#toolbar .group { display: inline-flex; align-items: center; gap: 4px; }
+#toolbar .spacer { flex: 1; }
+
+button {
+  font: inherit;
+  color: var(--vscode-button-secondaryForeground, inherit);
+  background: var(--vscode-button-secondaryBackground, #e5e5e5);
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 2px;
+  padding: 1px 8px;
+  cursor: pointer;
+  min-width: 26px;
+}
+button:hover { background: var(--vscode-button-secondaryHoverBackground, #d5d5d5); }
+input {
+  font: inherit;
+  color: var(--vscode-input-foreground, inherit);
+  background: var(--vscode-input-background, #fff);
+  border: 1px solid var(--vscode-input-border, #bbb);
+  padding: 1px 4px;
+}
+#pageNumber { width: 4em; text-align: right; }
+#findInput { width: 18em; }
+#zoomValue, #findResult, #numPages { opacity: 0.8; }
+
+#viewerContainer {
+  position: absolute;
+  top: 32px;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  overflow: auto;
+  outline: none;
+  background: var(--vscode-editor-background, #ddd);
+}
+body.finding #viewerContainer { top: 64px; }
+
+#message {
+  position: absolute;
+  left: 50%;
+  top: 48px;
+  transform: translateX(-50%);
+  max-width: 80%;
+  padding: 6px 12px;
+  z-index: 20;
+  color: var(--vscode-inputValidation-errorForeground, inherit);
+  background: var(--vscode-inputValidation-errorBackground, #fdd);
+  border: 1px solid var(--vscode-inputValidation-errorBorder, #c00);
+}
