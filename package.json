@@ -1,0 +1,108 @@
+{
+  "name": "vscode-pdf-mcp",
+  "displayName": "PDF viewer for agents (vscode-pdf-mcp)",
+  "description": "A PDF viewer for VS Code that an AI agent can see into: an MCP server and a Claude Code hook report the document, page and selection you are reading.",
+  "version": "0.1.0",
+  "publisher": "david-wang-0",
+  "license": "MIT",
+  "author": "David Wang",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/david-wang-0/vscode-pdf-mcp"
+  },
+  "engines": {
+    "vscode": "^1.90.0",
+    "node": ">=20"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "pdf",
+    "mcp",
+    "claude",
+    "viewer",
+    "pdf.js"
+  ],
+  "main": "./extension/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "vscodePdfMcp.viewer",
+        "displayName": "PDF viewer (vscode-pdf-mcp)",
+        "selector": [
+          {
+            "filenamePattern": "*.pdf"
+          },
+          {
+            "filenamePattern": "*.PDF"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "commands": [
+      {
+        "command": "vscodePdfMcp.openExternal",
+        "title": "Open in Okular",
+        "category": "PDF",
+        "icon": "$(link-external)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "vscodePdfMcp.openExternal",
+          "when": "activeCustomEditorId == vscodePdfMcp.viewer",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "vscodePdfMcp.openExternal",
+          "when": "activeCustomEditorId == vscodePdfMcp.viewer"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "PDF viewer (vscode-pdf-mcp)",
+      "properties": {
+        "vscodePdfMcp.externalViewer": {
+          "type": "string",
+          "default": "okular",
+          "description": "Executable for \"Open in Okular\" when the pdf-external-open extension is not installed; it is run with the PDF's absolute path as its only argument."
+        }
+      }
+    }
+  },
+  "bin": {
+    "vscode-pdf-mcp": "mcp/server.js",
+    "vscode-pdf-mcp-hook": "bin/hook.js"
+  },
+  "files": [
+    "extension/",
+    "lib/",
+    "mcp/",
+    "bin/",
+    "media/",
+    "CONTRACT.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "test:integration": "node test/integration/run.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "pdfjs-dist": "6.4.299",
+    "zod": "4.6.6"
+  },
+  "devDependencies": {
+    "@vscode/test-electron": "3.1.0",
+    "playwright-core": "1.64.0"
+  }
+}
