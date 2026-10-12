@@ -1,0 +1,83 @@
+#!/usr/bin/env node
+// @ts-check
+/**
+ * Integration test in a real VS Code (downloaded by @vscode/test-electron into
+ * .vscode-test/, with a scratch user-data and extensions dir), under xvfb-run so no window
+ * appears on the desktop. Skipped (exit 0, with a message) when xvfb-run is not installed.
+ *
+ *   npm run test:integration          [VSCODE_VERSION=1.90.0 to pin the VS Code under test]
+ */
+"use strict";
+
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
+const { which } = require("../../lib/backend");
+
+const root = path.resolve(__dirname, "../..");
+
+if (!process.env.VPDF_UNDER_XVFB) {
+  const xvfb = which("xvfb-run", process.env);
+  if (!xvfb) {
+    process.stdout.write("integration test SKIPPED: xvfb-run is not installed (it must not open a window on the desktop)\n");
+    process.exit(0);
+  }
+  /** @type {NodeJS.ProcessEnv} */
+  const env = { ...process.env, VPDF_UNDER_XVFB: "1" };
+  // Make sure Electron uses the Xvfb display, never the user's Wayland session.
+  delete env.WAYLAND_DISPLAY;
+  delete env.ELECTRON_OZONE_PLATFORM_HINT;
+  delete env.DISPLAY;
+  const r = spawnSync(xvfb, ["-a", "-s", "-screen 0 1280x900x24", process.execPath, __filename], { env, stdio: "inherit" });
+  process.exit(r.status ?? 1);
+}
+
+const { runTests } = require("@vscode/test-electron");
+const { samplePdf } = require("../helpers/pdf");
+
+async function main() {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "vpdf-int-"));
+  const workspace = path.join(tmp, "workspace");
+  const stateDir = path.join(tmp, "state");
+  fs.mkdirSync(workspace);
+  fs.mkdirSync(stateDir, { mode: 0o700 });
+  fs.writeFileSync(path.join(workspace, "paper.pdf"), samplePdf(5));
+  fs.writeFileSync(path.join(workspace, "other.pdf"), samplePdf(2, "other"));
+  fs.writeFileSync(path.join(workspace, "broken.pdf"), "%PDF-1.4\nthis is not a PDF\n");
+  const fake = path.join(tmp, "fake-okular");
+  fs.writeFileSync(fake, `#!/bin/sh\nprintf '%s\\n' "$@" > '${path.join(tmp, "fake-okular.log")}'\n`, { mode: 0o755 });
+  try {
+    await runTests({
+      version: process.env.VSCODE_VERSION || "stable",
+      extensionDevelopmentPath: root,
+      extensionTestsPath: path.join(__dirname, "suite.js"),
+      launchArgs: [
+        workspace,
+        "--user-data-dir", path.join(tmp, "user-data"),
+        "--extensions-dir", path.join(tmp, "extensions"),
+        "--disable-workspace-trust",
+        "--skip-welcome",
+        "--skip-release-notes",
+        "--disable-gpu",
+        "--no-sandbox",
+      ],
+      extensionTestsEnv: {
+        VSCODE_PDF_MCP_DIR: stateDir,
+        VPDF_TEST_TMP: tmp,
+        VPDF_FAKE_VIEWER: fake,
+        VSCODE_PDF_MCP_DEBUG: "1",
+      },
+    });
+    const left = fs.readdirSync(stateDir);
+    if (left.length) throw new Error(`state files left after VS Code exited: ${left.join(", ")}`);
+    process.stdout.write("integration test passed\n");
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+main().catch((e) => {
+  process.stderr.write(`integration test FAILED: ${e instanceof Error ? e.stack : e}\n`);
+  process.exit(1);
+});
