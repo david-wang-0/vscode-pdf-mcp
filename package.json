@@ -74,6 +74,50 @@
           "type": "string",
           "default": "okular",
           "description": "Executable for \"Open in Okular\" when the pdf-external-open extension is not installed; it is run with the PDF's absolute path as its only argument."
+        },
+        "vscodePdfMcp.editCommand": {
+          "type": "string",
+          "default": "pdf-reader-writer-edit",
+          "description": "The edit service every mark is written through: pdf-reader-writer-mcp's `pdf-reader-writer-edit`, looked up on PATH unless this is an absolute path. Marking is off when it cannot be started. The environment variable VSCODE_PDF_MCP_EDIT_COMMAND overrides it."
+        },
+        "vscodePdfMcp.editArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Arguments for vscodePdfMcp.editCommand."
+        },
+        "vscodePdfMcp.author": {
+          "type": "string",
+          "default": "",
+          "description": "Author (/T) written into your marks, and the author whose marks you may edit and delete. Empty: your login name."
+        },
+        "vscodePdfMcp.keys": {
+          "type": "object",
+          "default": {},
+          "markdownDescription": "Shortcuts in the PDF viewer, active when the focus is not in a text field. Keys: `highlight` (default `h`), `underline` (`u`), `squiggly` (`s`), `strikeout` (`x`) apply to the current selection; `note` (`n`) toggles the margin-note tool; `undo` (`ctrl+z`). A value is a key with optional modifiers, e.g. `\"shift+h\"`. Escape always returns to no tool.",
+          "properties": {
+            "highlight": {
+              "type": "string"
+            },
+            "underline": {
+              "type": "string"
+            },
+            "squiggly": {
+              "type": "string"
+            },
+            "strikeout": {
+              "type": "string"
+            },
+            "note": {
+              "type": "string"
+            },
+            "undo": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
         }
       }
     }

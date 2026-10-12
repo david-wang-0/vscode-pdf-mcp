@@ -3,15 +3,20 @@
  * VS Code glue: a readonly custom editor for *.pdf backed by pdf.js in a webview. Each
  * window (extension host) publishes `<pid>.json` and serves `<pid>.sock` in the runtime
  * directory, so the MCP server and the hook can see what the user is reading and the
- * server can `goto`. Everything vscode-free lives in state.js, ipc.js, html.js and lib/.
+ * server can `goto`. The user's marks are written through pdf-reader-writer-mcp's edit
+ * service (`Marking` below). Everything vscode-free lives in state.js, ipc.js, html.js,
+ * editservice.js, marks.js and lib/.
  */
 "use strict";
 
 const vscode = require("vscode");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { StateStore } = require("./state");
+const { EditService } = require("./editservice");
+const { MarkController } = require("./marks");
 const ipc = require("./ipc");
 const { renderHtml, nonce } = require("./html");
 const { stateDir } = require("../lib/runtime");
@@ -123,6 +128,7 @@ class PdfPanel {
       case "ready":
         void this.panel.webview.postMessage({ type: "visibility", visible: this.panel.visible });
         void this.sendFile(false);
+        void this.owner.marking.sendState(this);
         break;
       case "loaded":
         this.pages = m.pages;
@@ -130,6 +136,17 @@ class PdfPanel {
         store.updatePanel(this.id, { pages: m.pages, page: m.page });
         this.resolveLoaded?.();
         if (m.reload) trace(`reloaded ${this.path} (${m.pages} pages, at page ${m.page})`);
+        void this.owner.marking.sendList(this);
+        break;
+      case "mark":
+      case "note":
+      case "reply":
+      case "update":
+      case "delete":
+      case "undo":
+        return this.owner.marking.handle(this, m);
+      case "prefs":
+        this.owner.marking.savePrefs(m);
         break;
       case "loadError":
         trace(`cannot load ${this.path}: ${m.message}`);
@@ -178,6 +195,18 @@ class PdfPanel {
       trace(`cannot read ${this.path}: ${e instanceof Error ? e.message : e}`);
       if (!reload) this.rejectLoaded?.(new Error(`cannot open ${this.path}`));
     }
+  }
+
+  /** Re-read the file now (after our own write), without waiting for the watcher. */
+  reloadNow() {
+    if (this.disposed) return;
+    clearTimeout(this.reloadTimer);
+    void this.sendFile(true);
+  }
+
+  /** @param {any} msg */
+  post(msg) {
+    if (!this.disposed) void this.panel.webview.postMessage(msg);
   }
 
   /**
@@ -250,6 +279,12 @@ class Viewer {
     this.panels = new Set();
     /** @type {Map<string, Set<(p: PdfPanel) => void>>} realpath -> waiters */
     this.panelWaiters = new Map();
+    this.marking = new Marking(this);
+  }
+
+  /** Reload every tab that shows `real` (a realpath) now. @param {string} real */
+  reloadPath(real) {
+    for (const p of this.panels) if (p.realPath === real) p.reloadNow();
   }
 
   /** @param {vscode.Uri} uri @returns {vscode.CustomDocument} */
@@ -321,6 +356,159 @@ class Viewer {
       default:
         return { ok: false, error: `unknown op: ${req.op}` };
     }
+  }
+}
+
+/**
+ * The user's marks: one edit service per window, started lazily when the first PDF tab
+ * opens; undo stacks per document (MarkController). A missing service turns the mark
+ * tools off, with one message per window naming pdf-reader-writer-mcp.
+ */
+class Marking {
+  /** @param {Viewer} viewer */
+  constructor(viewer) {
+    this.viewer = viewer;
+    /** @type {EditService | null} */
+    this.service = null;
+    /** @type {Promise<{ok: boolean, reason?: string, missing?: boolean}> | null} */
+    this.status = null;
+    this.checkedAt = 0;
+    this.warned = false;
+    this.controller = new MarkController({
+      request: (op, fields) => this.ensure().request(op, fields),
+      author: () => this.author(),
+      onWritten: (real) => viewer.reloadPath(real),
+    });
+  }
+
+  config() {
+    return vscode.workspace.getConfiguration("vscodePdfMcp");
+  }
+
+  author() {
+    const set = String(this.config().get("author", "") || "").trim();
+    if (set) return set;
+    try {
+      return os.userInfo().username;
+    } catch {
+      return process.env.USER || "user";
+    }
+  }
+
+  ensure() {
+    if (!this.service) {
+      const cfg = this.config();
+      const command = process.env.VSCODE_PDF_MCP_EDIT_COMMAND || String(cfg.get("editCommand", "pdf-reader-writer-edit") || "pdf-reader-writer-edit");
+      const args = (cfg.get("editArgs", []) || []).map(String);
+      trace(`edit service: ${[command, ...args].join(" ")}`);
+      this.service = new EditService({ command, args, log: trace });
+    }
+    return this.service;
+  }
+
+  /** Start the service and check it; a failure is re-checked when the next tab opens. */
+  probe() {
+    if (!this.status) {
+      this.status = this.ensure().probe().then((s) => {
+        this.checkedAt = Date.now();
+        if (!s.ok) {
+          trace(`marking off: ${s.reason}`);
+          if (!this.warned) {
+            this.warned = true;
+            void vscode.window.showWarningMessage(`vscode-pdf-mcp: marking PDFs is off. ${s.reason}`);
+          }
+        }
+        return s;
+      });
+    }
+    return this.status;
+  }
+
+  /** Configuration changed: next use starts the (new) service and checks it again. */
+  reset() {
+    this.service?.dispose();
+    this.service = null;
+    this.status = null;
+    this.warned = false;
+  }
+
+  /** @param {PdfPanel} panel */
+  async sendState(panel) {
+    if (this.status && !(await this.status).ok && Date.now() - this.checkedAt > 2000) {
+      // Installed since? Check again for this tab (without a second message).
+      this.service?.dispose();
+      this.service = null;
+      this.status = null;
+    }
+    const s = await this.probe();
+    const cfg = this.config();
+    const prefs = this.viewer.context.globalState.get("vscodePdfMcp.markPrefs", {});
+    panel.post({
+      type: "marking",
+      enabled: s.ok,
+      reason: s.ok ? "" : s.reason,
+      author: this.author(),
+      keys: cfg.get("keys", {}),
+      ...(prefs && typeof prefs === "object" ? prefs : {}),
+    });
+  }
+
+  /** Send the service's annotation list (it has the marked text) after a (re)load. @param {PdfPanel} panel */
+  async sendList(panel) {
+    const s = await this.probe();
+    if (!s.ok) return;
+    try {
+      const list = await this.ensure().request("list", { path: panel.realPath });
+      panel.post({ type: "annotations", list });
+    } catch (e) {
+      trace(`list ${panel.path}: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  /** @param {any} m */
+  savePrefs(m) {
+    const prefs = {};
+    if (typeof m.style === "string") Object.assign(prefs, { style: m.style });
+    if (typeof m.color === "string") Object.assign(prefs, { color: m.color });
+    void this.viewer.context.globalState.update("vscodePdfMcp.markPrefs", prefs);
+  }
+
+  /**
+   * A write (or undo) asked for by the webview; answers `editResult {reqId, ok, result |
+   * error}` and resolves with the same.
+   * @param {PdfPanel} panel @param {any} m
+   */
+  async handle(panel, m) {
+    const reply = (/** @type {any} */ r) => {
+      panel.post({ type: "editResult", reqId: m.reqId, op: m.type, ...r });
+      return r;
+    };
+    const s = await this.probe();
+    if (!s.ok) return reply({ ok: false, error: `marking is off: ${s.reason}` });
+    const c = this.controller;
+    const real = panel.realPath;
+    try {
+      const result = await (async () => {
+        switch (m.type) {
+          case "mark": return c.mark(real, m);
+          case "note": return c.note(real, m);
+          case "reply": return c.reply(real, m);
+          case "update": return c.update(real, m);
+          case "delete": return c.remove(real, m);
+          default: return c.undo(real);
+        }
+      })();
+      return reply({ ok: true, result: result ?? null });
+    } catch (e) {
+      const error = e instanceof Error ? e.message : String(e);
+      trace(`${m.type} on ${panel.path}: ${error}`);
+      return reply({ ok: false, error });
+    }
+  }
+
+  dispose() {
+    this.service?.dispose();
+    this.service = null;
   }
 }
 
@@ -396,6 +584,14 @@ async function activate(context) {
       const uri = arg instanceof vscode.Uri ? arg : viewer.pick(null)?.uri;
       if (uri) return openExternalViewer(uri);
     }),
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      const affects = (/** @type {string} */ k) => e.affectsConfiguration(`vscodePdfMcp.${k}`);
+      if (affects("editCommand") || affects("editArgs")) viewer.marking.reset();
+      if (["editCommand", "editArgs", "author", "keys"].some(affects)) {
+        for (const p of viewer.panels) void viewer.marking.sendState(p);
+      }
+    }),
+    { dispose: () => viewer.marking.dispose() },
   );
 
   /** @type {import("node:net").Server | null} */

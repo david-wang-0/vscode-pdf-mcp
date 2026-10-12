@@ -69,9 +69,20 @@ ${extraHead}</head>
     <button id="fitWidth" title="Fit width" aria-label="Fit width">Fit width</button>
     <span id="zoomValue"></span>
   </span>
+  <span class="group" id="markTools" role="group" aria-label="Mark tools">
+    <button class="tool" data-tool="highlight" aria-pressed="false" title="Highlight tool" aria-label="Highlight tool" disabled><span class="glyph g-highlight">ab</span></button>
+    <button class="tool" data-tool="underline" aria-pressed="false" title="Underline tool" aria-label="Underline tool" disabled><span class="glyph g-underline">ab</span></button>
+    <button class="tool" data-tool="squiggly" aria-pressed="false" title="Squiggly tool" aria-label="Squiggly tool" disabled><span class="glyph g-squiggly">ab</span></button>
+    <button class="tool" data-tool="strikeout" aria-pressed="false" title="Strikeout tool" aria-label="Strikeout tool" disabled><span class="glyph g-strikeout">ab</span></button>
+    <button class="tool" data-tool="note" aria-pressed="false" title="Margin note tool" aria-label="Margin note tool" disabled>Note</button>
+    <button id="colorButton" title="Colour" aria-label="Colour" aria-haspopup="true" aria-expanded="false" disabled><span class="swatch" id="colorSwatch"></span></button>
+    <button id="undo" title="Undo" aria-label="Undo" disabled>Undo</button>
+  </span>
   <span class="spacer"></span>
+  <button id="panelToggle" aria-pressed="false" title="Show the annotations">Annotations</button>
   <button id="openExternal" title="Open this PDF in Okular">Open in Okular</button>
 </div>
+<div id="colorMenu" class="vpdf-ui menu" role="menu" aria-label="Colour" hidden></div>
 <div id="findbar" hidden>
   <input id="findInput" type="text" placeholder="Find in document" aria-label="Find in document">
   <button id="findPrev" title="Previous match (Shift+Enter)" aria-label="Previous match">&uarr;</button>
@@ -80,7 +91,9 @@ ${extraHead}</head>
   <button id="findClose" title="Close (Escape)" aria-label="Close">&times;</button>
 </div>
 <div id="viewerContainer" tabindex="0"><div id="viewer" class="pdfViewer"></div></div>
+<aside id="annotPanel" class="vpdf-ui" aria-label="Annotations" hidden></aside>
 <div id="message" hidden></div>
+<div id="status" role="status" aria-live="polite" hidden></div>
 <script type="module" nonce="${n}" src="${urls.viewerJs}"></script>
 </body>
 </html>

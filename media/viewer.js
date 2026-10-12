@@ -7,11 +7,13 @@
  *
  * Messages to the extension: ready, loaded {pages, page, reload}, loadError {message,
  * reload}, page {page}, selection {selection: {text, page} | null}, gotoDone {reqId, page},
- * openLink {url}, openExternalViewer.
- * Messages from the extension: load {data, reload}, goto {page, reqId}, visibility {visible}.
+ * openLink {url}, openExternalViewer, and the marking messages of annotate.mjs.
+ * Messages from the extension: load {data, reload}, goto {page, reqId}, visibility
+ * {visible}, and the marking messages of annotate.mjs.
  */
 
 import { normaliseSelection } from "./textnorm.mjs";
+import { setupMarking } from "./annotate.mjs";
 
 // @ts-ignore provided by VS Code (or the development harness)
 const vscode = acquireVsCodeApi();
@@ -390,10 +392,15 @@ document.addEventListener("selectionchange", () => {
   selTimer = setTimeout(reportSelection, 150);
 });
 
+// ---- marking (annotate.mjs) ------------------------------------------------------------
+
+const marking = setupMarking({ pdfViewer, eventBus, container, post, getDocument: () => pdfDocument, vscode });
+
 // ---- messages from the extension -----------------------------------------------------
 
 handle = (msg) => {
   if (!msg || typeof msg !== "object") return;
+  if (marking.handle(msg)) return;
   if (msg.type === "load") {
     void load(msg.data instanceof Uint8Array ? msg.data : new Uint8Array(msg.data), !!msg.reload);
   } else if (msg.type === "visibility") {

@@ -75,3 +75,169 @@ body.finding #viewerContainer { top: 64px; }
   background: var(--vscode-inputValidation-errorBackground, #fdd);
   border: 1px solid var(--vscode-inputValidation-errorBorder, #c00);
 }
+
+/* ---- marking (annotate.mjs) ------------------------------------------------------- */
+
+/* pdf.js's own popups are replaced by our popover; its annotation sections let the
+   pointer through (we hit-test ourselves), so text under a mark stays selectable. Links
+   and form fields keep their behaviour. The appearance streams still render. */
+.annotationLayer .popupAnnotation { display: none !important; }
+.annotationLayer section:not(.linkAnnotation):not([class*="WidgetAnnotation"]) { pointer-events: none !important; }
+body.over-annot .textLayer, body.over-annot .textLayer span, body.over-annot .page { cursor: pointer; }
+body.tool-note .page, body.tool-note .textLayer, body.tool-note .textLayer span { cursor: crosshair; }
+
+#toolbar { overflow: hidden; }
+#toolbar button[aria-pressed="true"] {
+  background: var(--vscode-button-background, #0e639c);
+  color: var(--vscode-button-foreground, #fff);
+}
+#toolbar button:disabled, .vpdf-ui button:disabled { opacity: 0.45; cursor: default; }
+.glyph { font-weight: 600; padding: 0 2px; --mark: #ffe64d; }
+.glyph.g-highlight { background: var(--mark); color: #000; border-radius: 2px; }
+.glyph.g-underline { text-decoration: underline 2px var(--mark); text-underline-offset: 2px; }
+.glyph.g-squiggly { text-decoration: underline wavy var(--mark); text-underline-offset: 2px; }
+.glyph.g-strikeout { text-decoration: line-through 2px var(--mark); }
+#toolbar .glyph { --mark: currentColor; }
+#toolbar .glyph.g-highlight { --mark: #ffe64d; }
+.swatch {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  vertical-align: middle;
+  border: 1px solid var(--vscode-editorWidget-border, #888);
+}
+
+.vpdf-ui {
+  font-family: var(--vscode-font-family, sans-serif);
+  font-size: var(--vscode-font-size, 13px);
+  color: var(--vscode-editorWidget-foreground, var(--vscode-foreground, #222));
+}
+.vpdf-ui button.primary {
+  background: var(--vscode-button-background, #0e639c);
+  color: var(--vscode-button-foreground, #fff);
+}
+.vpdf-ui textarea {
+  font: inherit;
+  color: var(--vscode-input-foreground, inherit);
+  background: var(--vscode-input-background, #fff);
+  border: 1px solid var(--vscode-input-border, #bbb);
+  resize: vertical;
+  box-sizing: border-box;
+  width: 100%;
+}
+.vpdf-ui textarea:focus { outline: 1px solid var(--vscode-focusBorder, #0078d4); }
+
+#vpdfLayer { position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 30; }
+.miniBar, .popover, .noteEditor, .tip, .menu {
+  position: absolute;
+  background: var(--vscode-editorWidget-background, #f3f3f3);
+  border: 1px solid var(--vscode-editorWidget-border, var(--vscode-widget-border, #c8c8c8));
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.3));
+  border-radius: 4px;
+}
+.miniBar[hidden], .popover[hidden], .noteEditor[hidden], .tip[hidden], .menu[hidden] { display: none; }
+.miniBar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  max-width: 420px;
+}
+.miniBar .styles, .restyle .styles { display: inline-flex; gap: 2px; }
+.miniBar .noteBox { flex-basis: 100%; display: flex; gap: 4px; align-items: flex-start; }
+.miniBar .noteBox textarea { width: 300px; }
+.swatches { display: inline-flex; gap: 3px; align-items: center; }
+.swatchButton {
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+  padding: 0;
+  border-radius: 3px;
+  background: var(--swatch) !important;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+}
+.swatchButton[aria-pressed="true"] { outline: 2px solid var(--vscode-focusBorder, #0078d4); outline-offset: 1px; }
+.styleButton[aria-pressed="true"] { outline: 2px solid var(--vscode-focusBorder, #0078d4); }
+.menu { position: fixed; z-index: 50; padding: 6px; }
+
+.noteEditor { padding: 6px; width: 280px; display: flex; flex-direction: column; gap: 4px; align-items: flex-end; }
+
+.tip { padding: 4px 8px; max-width: 360px; pointer-events: none; white-space: pre-wrap; }
+.tip .tipHead { opacity: 0.75; font-size: 0.92em; }
+.tip .tipMore { opacity: 0.75; font-size: 0.92em; font-style: italic; }
+
+.popover { width: 380px; max-height: 60vh; overflow: auto; padding: 6px 8px 8px; }
+.popover .popHead { display: flex; align-items: center; justify-content: space-between; opacity: 0.8; }
+.popover .popHead .close { min-width: 22px; padding: 0 4px; }
+.item, .panelItem { padding: 4px 0; }
+.item .head, .panelItem .head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.item .author, .panelItem .author { font-weight: 600; }
+.item .date, .item .type, .panelItem .type { color: var(--vscode-descriptionForeground, #666); font-size: 0.92em; }
+.item.current > .head .author { text-decoration: underline; }
+.chip {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  flex: none;
+}
+.quote {
+  margin: 4px 0;
+  padding: 2px 8px;
+  border-left: 3px solid var(--vscode-textBlockQuote-border, #bbb);
+  background: var(--vscode-textBlockQuote-background, rgba(127, 127, 127, 0.1));
+  white-space: pre-wrap;
+}
+.note { white-space: pre-wrap; margin: 2px 0; overflow-wrap: anywhere; }
+.item .actions { display: flex; gap: 4px; margin-top: 3px; flex-wrap: wrap; }
+.item .restyle { display: flex; gap: 8px; margin-top: 4px; align-items: center; flex-wrap: wrap; }
+.replies { margin-left: 10px; padding-left: 8px; border-left: 2px solid var(--vscode-editorWidget-border, #ccc); }
+.replyBox { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; align-items: flex-end; }
+.replyBox .replyLabel { align-self: flex-start; color: var(--vscode-descriptionForeground, #666); }
+.popover .off { margin-top: 6px; color: var(--vscode-descriptionForeground, #666); }
+
+#annotPanel {
+  position: absolute;
+  top: 32px;
+  right: 0;
+  bottom: 0;
+  width: 320px;
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 0 8px 8px;
+  background: var(--vscode-sideBar-background, var(--vscode-editorWidget-background, #f3f3f3));
+  border-left: 1px solid var(--vscode-panel-border, var(--vscode-editorWidget-border, #ccc));
+  z-index: 9;
+}
+#annotPanel[hidden] { display: none; }
+body.panel-open #viewerContainer { right: 320px; }
+body.finding #annotPanel { top: 64px; }
+#annotPanel .panelHead { position: sticky; top: 0; padding: 6px 0; font-weight: 600; background: inherit; }
+#annotPanel .pageHead { margin-top: 8px; color: var(--vscode-descriptionForeground, #666); font-size: 0.92em; text-transform: uppercase; }
+#annotPanel .panelItem { cursor: pointer; border-radius: 3px; padding: 4px; }
+#annotPanel .panelItem:hover { background: var(--vscode-list-hoverBackground, rgba(127, 127, 127, 0.12)); }
+#annotPanel .panelItem .quote { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+#annotPanel .empty { opacity: 0.7; }
+
+#status {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  max-width: 80%;
+  padding: 4px 12px;
+  z-index: 40;
+  background: var(--vscode-editorWidget-background, #f3f3f3);
+  border: 1px solid var(--vscode-editorWidget-border, #c8c8c8);
+  border-radius: 4px;
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.3));
+}
+#status.error {
+  color: var(--vscode-inputValidation-errorForeground, inherit);
+  background: var(--vscode-inputValidation-errorBackground, #fdd);
+  border-color: var(--vscode-inputValidation-errorBorder, #c00);
+}
+#status[hidden] { display: none; }
