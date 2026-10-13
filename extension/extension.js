@@ -4,11 +4,12 @@
  * window (extension host) publishes `<pid>.json` and serves `<pid>.sock` in the runtime
  * directory, so the MCP server and the hook can see what the user is reading and the
  * server can `goto`. The user's marks are written through pdf-reader-writer-mcp's edit
- * service (`Marking` below). SyncTeX (Ctrl+hover, Ctrl+click, forward search, the
+ * service (`Marking` below), and copied into the LaTeX source by its `sync` (sourcesync.js
+ * decides when). SyncTeX (Ctrl+hover, Ctrl+click, forward search, the
  * selection's source lines) is parsed in-process by synctexstore.js and lib/synctex.js;
  * media/wordmatch.mjs takes both directions from the line to the word.
  * Everything vscode-free lives in state.js, ipc.js, html.js, editservice.js, marks.js,
- * synctexstore.js and lib/.
+ * sourcesync.js, synctexstore.js and lib/.
  */
 "use strict";
 
@@ -21,6 +22,7 @@ const { pathToFileURL } = require("node:url");
 const { StateStore } = require("./state");
 const { EditService } = require("./editservice");
 const { MarkController } = require("./marks");
+const { SourceSync, changedFiles, sourcesAmong } = require("./sourcesync");
 const { SynctexStore, pdfCandidatesForTex, sourceLine, sourceLines, snippet } = require("./synctexstore");
 const ipc = require("./ipc");
 const { renderHtml, nonce } = require("./html");
@@ -32,6 +34,9 @@ const EXTERNAL_VIEW_TYPE = "pdfExternalOpen.editor";
 /** The server waits 10 s; answer (or fail) a little before that. */
 const OPEN_TIMEOUT_MS = 9000;
 const RELOAD_DEBOUNCE_MS = 200;
+/** A sync runs SyncTeX for each new mark: more time than a mark. */
+const SYNC_TIMEOUT_MS = 120000;
+const PDFNOTES_README = "https://github.com/david-wang-0/pdf-reader-writer-mcp/blob/main/latex/README.md";
 
 /** @type {vscode.OutputChannel | undefined} */
 let log;
@@ -594,7 +599,8 @@ class Viewer {
 /**
  * The user's marks: one edit service per window, started lazily when the first PDF tab
  * opens; undo stacks per document (MarkController). A missing service turns the mark
- * tools off, with one message per window naming pdf-reader-writer-mcp.
+ * tools off, with one message per window naming pdf-reader-writer-mcp. After each write
+ * the marks are copied into the LaTeX source (SourceSync), unless switched off.
  */
 class Marking {
   /** @param {Viewer} viewer */
@@ -602,14 +608,38 @@ class Marking {
     this.viewer = viewer;
     /** @type {EditService | null} */
     this.service = null;
-    /** @type {Promise<{ok: boolean, reason?: string, missing?: boolean}> | null} */
+    /** @type {Promise<{ok: boolean, version?: number, reason?: string, missing?: boolean}> | null} */
     this.status = null;
     this.checkedAt = 0;
     this.warned = false;
     this.controller = new MarkController({
       request: (op, fields) => this.ensure().request(op, fields),
       author: () => this.author(),
-      onWritten: (real) => viewer.reloadPath(real),
+      onWritten: (real) => {
+        viewer.reloadPath(real);
+        this.sourceSync.schedule(real);
+      },
+    });
+    this.sourceSync = new SourceSync({
+      request: (pdf) => this.ensure().request("sync", { path: pdf }, { timeoutMs: SYNC_TIMEOUT_MS }),
+      version: async () => {
+        const s = await this.probe();
+        return s.ok ? s.version ?? 1 : 0;
+      },
+      dirtySources: (pdf) => dirtySources(pdf, viewer.synctex.peek(pdf)),
+      enabled: () => this.config().get("syncMarksToSource") !== false,
+      // after the writes queued before it, and none of them runs in the middle of it
+      serial: (pdf, fn) => this.controller.serial(pdf, fn),
+      onSynced: (_pdf, r) => void vscode.window.setStatusBarMessage(`$(check) Marks copied into ${changedFiles(r).join(", ")}`, 5000),
+      onNoPdfnotes: (pdf) => {
+        void vscode.window.showInformationMessage(`Marks in ${path.basename(pdf)} are not copied into the LaTeX source: `
+          + "no source loads pdfnotes. See the pdfnotes README to set it up.", "Open README").then((b) => {
+          if (b) void vscode.env.openExternal(vscode.Uri.parse(PDFNOTES_README));
+        });
+      },
+      onError: (pdf, message) => void vscode.window.showWarningMessage(
+        `vscode-pdf-mcp: cannot copy the marks of ${path.basename(pdf)} into the LaTeX source: ${message}`),
+      log: trace,
     });
   }
 
@@ -739,9 +769,21 @@ class Marking {
   }
 
   dispose() {
+    this.sourceSync.dispose();
     this.service?.dispose();
     this.service = null;
   }
+}
+
+/**
+ * The files open with unsaved changes that are sources of `pdf` (by its SyncTeX data
+ * `data`, else LaTeX files under its directory).
+ * @param {string} pdf @param {import("../lib/synctex").Synctex | null} data
+ */
+function dirtySources(pdf, data) {
+  const dirty = vscode.workspace.textDocuments.filter((d) => d.isDirty && !d.isClosed && d.uri.scheme === "file")
+    .map((d) => d.uri.fsPath);
+  return dirty.length ? sourcesAmong(pdf, data, dirty) : [];
 }
 
 /**
@@ -910,6 +952,15 @@ async function activate(context) {
     }),
     vscode.window.onDidChangeActiveTextEditor((e) => {
       if (e && e.viewColumn !== undefined) lastTextColumn = e.viewColumn;
+    }),
+    // a sync held back by unsaved sources runs once they are saved, closed or reverted
+    vscode.workspace.onDidSaveTextDocument(() => viewer.marking.sourceSync.recheck()),
+    vscode.workspace.onDidCloseTextDocument(() => viewer.marking.sourceSync.recheck()),
+    vscode.workspace.onDidChangeTextDocument((e) => {
+      if (!e.document.isDirty) viewer.marking.sourceSync.recheck();
+    }),
+    vscode.window.tabGroups.onDidChangeTabs((e) => {
+      if (e.closed.length) viewer.marking.sourceSync.recheck();
     }),
     vscode.workspace.onDidChangeConfiguration((e) => {
       const affects = (/** @type {string} */ k) => e.affectsConfiguration(`vscodePdfMcp.${k}`);

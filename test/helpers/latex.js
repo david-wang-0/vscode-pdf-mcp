@@ -99,18 +99,21 @@ function buildProject(dir, { extraChapterLines = "" } = {}) {
 
 /**
  * Write `files` (relative path -> text) into `dir` and compile `main` there with
- * `pdflatex -synctex=1`.
+ * `pdflatex -synctex=1`, `runs` times, in the environment `env` (e.g. a TEXINPUTS).
  * @param {string} dir @param {Record<string, string>} files @param {string} [main]
+ * @param {{runs?: number, env?: NodeJS.ProcessEnv}} [opts]
  */
-function compile(dir, files, main = "main.tex") {
+function compile(dir, files, main = "main.tex", { runs = 1, env = process.env } = {}) {
   for (const [rel, text] of Object.entries(files)) {
     const file = path.join(dir, rel);
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, text);
   }
-  const r = spawnSync("pdflatex", ["-synctex=1", "-interaction=nonstopmode", "-halt-on-error", main],
-    { cwd: dir, encoding: "utf8", timeout: 60000 });
-  if (r.status !== 0) throw new Error(`pdflatex failed (${r.status}):\n${(r.stdout || "").slice(-2000)}`);
+  for (let i = 0; i < runs; i++) {
+    const r = spawnSync("pdflatex", ["-synctex=1", "-interaction=nonstopmode", "-halt-on-error", main],
+      { cwd: dir, encoding: "utf8", timeout: 60000, env });
+    if (r.status !== 0) throw new Error(`pdflatex failed (${r.status}):\n${(r.stdout || "").slice(-2000)}`);
+  }
 }
 
 /**

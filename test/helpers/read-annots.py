@@ -2,7 +2,8 @@
 
     python3 -I test/helpers/read-annots.py some.pdf
 prints {"repaired": bool, "annots": [{page, xref, subtype, author, contents, irt,
-quads, color}, ...]}; `quads` is the number of /QuadPoints quads (0 if none).
+quads, color, nm}, ...]}; `quads` is the number of /QuadPoints quads (0 if none), `nm`
+the /NM ("" if none).
 """
 
 import json
@@ -28,5 +29,6 @@ for n, page in enumerate(doc, start=1):
             "irt": a.irt_xref,
             "quads": len(verts) // 4 if a.type[0] in MARKUP else 0,
             "color": [round(c, 3) for c in stroke] if stroke else None,
+            "nm": a.info.get("id", ""),
         })
 print(json.dumps({"repaired": bool(doc.is_repaired), "annots": out}))

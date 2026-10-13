@@ -104,6 +104,11 @@
           "default": [],
           "description": "Arguments for vscodePdfMcp.editCommand."
         },
+        "vscodePdfMcp.syncMarksToSource": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "After each of your marks, copy the PDF's marks into its LaTeX source as `\\pdfmark`/`\\pdfnote` macros of the pdfnotes package (needs a `.synctex.gz` next to the PDF, a source that loads pdfnotes, and pdf-reader-writer-mcp's edit service with protocol 2). Held back while a source of the PDF has unsaved changes, and run when they are saved."
+        },
         "vscodePdfMcp.author": {
           "type": "string",
           "default": "",

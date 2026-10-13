@@ -15,7 +15,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { execFile, spawn } = require("node:child_process");
+const { execFile, spawn, spawnSync } = require("node:child_process");
 const vscode = require("vscode");
 const backend = require("../../lib/backend");
 const { hookOutput } = require("../../lib/hook");
@@ -148,6 +148,10 @@ async function run() {
   await synctex(ext);
   await vscode.commands.executeCommand("workbench.action.closeAllEditors");
   await waitFor(() => backend.readStates(dir).find((s) => s.pid === process.pid)?.panels.length === 0, "no panels left");
+
+  await sourceSync(ext);
+  await vscode.commands.executeCommand("workbench.action.closeAllEditors");
+  await waitFor(() => backend.readStates(dir).find((s) => s.pid === process.pid)?.panels.length === 0, "no panels left");
 }
 
 // ---- marking -----------------------------------------------------------------------
@@ -262,13 +266,10 @@ async function webviewFrame(browser, pagesText) {
 }
 
 /**
- * Marking with real mouse and keyboard input in the webview.
- * @param {string} pdf @param {import("playwright-core").Page} page @param {import("playwright-core").Frame} f
- * @param {any} client the MCP client, or null
+ * Mouse actions in a PDF webview.
+ * @param {import("playwright-core").Page} page @param {import("playwright-core").Frame} f
  */
-async function markingUi(pdf, page, f, client) {
-  await f.waitForSelector("#markTools .tool:not([disabled])", { timeout: 15000 });
-
+function markActions(page, f) {
   /** Drag-select the text-layer span with `text` on `pageNo`. @param {number} pageNo @param {string} text */
   const select = async (pageNo, text) => {
     const span = f.locator(`.page[data-page-number='${pageNo}'] .textLayer span`).filter({ hasText: text }).first();
@@ -280,15 +281,27 @@ async function markingUi(pdf, page, f, client) {
     await page.mouse.move(b.x + b.width - 1, b.y + b.height / 2, { steps: 6 });
     await page.mouse.up();
   };
-  /** Click the middle of annotation `xref` (its sections let the pointer through). @param {number} xref */
+  /**
+   * Click the middle of annotation `xref` (its sections let the pointer through). Tried
+   * again when a reload (the file changed, as after a sync) replaces the layer meanwhile.
+   * @param {number} xref
+   */
   const clickAnnot = async (xref) => {
-    const sec = f.locator(`.annotationLayer section[data-annotation-id='${xref}R']`).first();
-    await sec.waitFor({ state: "attached", timeout: 15000 });
-    await sec.scrollIntoViewIfNeeded();
-    const b = await sec.boundingBox();
-    assert.ok(b, `annotation ${xref} on screen`);
-    await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
-    await f.locator(`.popover:visible .item[data-id='${xref}R']`).waitFor({ timeout: 15000 });
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const sec = f.locator(`.annotationLayer section[data-annotation-id='${xref}R']`).first();
+        await sec.waitFor({ state: "attached", timeout: 15000 });
+        await sec.scrollIntoViewIfNeeded({ timeout: 5000 });
+        const b = await sec.boundingBox();
+        assert.ok(b, `annotation ${xref} on screen`);
+        await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
+        await f.locator(`.popover:visible .item[data-id='${xref}R']`).waitFor({ timeout: attempt < 3 ? 5000 : 15000 });
+        return;
+      } catch (e) {
+        if (attempt >= 3) throw e;
+        await delay(500);
+      }
+    }
   };
   /** Click the blank right margin mid-view (closes popovers, focuses the viewer, not a text field). */
   const clickBlank = async () => {
@@ -297,6 +310,17 @@ async function markingUi(pdf, page, f, client) {
     assert.ok(p1 && c);
     await page.mouse.click(p1.x + p1.width - 20, c.y + c.height / 2);
   };
+  return { select, clickAnnot, clickBlank };
+}
+
+/**
+ * Marking with real mouse and keyboard input in the webview.
+ * @param {string} pdf @param {import("playwright-core").Page} page @param {import("playwright-core").Frame} f
+ * @param {any} client the MCP client, or null
+ */
+async function markingUi(pdf, page, f, client) {
+  await f.waitForSelector("#markTools .tool:not([disabled])", { timeout: 15000 });
+  const { select, clickAnnot, clickBlank } = markActions(page, f);
 
   // 1. Select text: the selection reaches the state file and the hook (unchanged);
   //    mark it from the mini-bar: a /Highlight with /T = the login name and QuadPoints.
@@ -880,6 +904,148 @@ async function contextMenu({ f, page, main, pdf, mainEd }) {
   await closeMenu();
   await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
   fs.rmSync(notes);
+}
+
+// ---- marks into the LaTeX source -----------------------------------------------------
+
+/** `\pdfmark[opts]{text}{note}` in LaTeX source, parsed (no nested braces). @param {string} text */
+const pdfmarks = (text) => [...text.matchAll(/\\pdfmark\[([^\]]*)\]\{([^{}]*)\}\{([^{}]*)\}/g)]
+  .map((m) => ({ id: (/(?:^|,)id=([^,]+)/.exec(m[1]) || [])[1] || "", opts: m[1], text: m[2], note: m[3] }));
+
+/**
+ * Marks copied into the LaTeX source as they are made (the edit service's `sync`), with
+ * the real mouse on a document that loads pdfnotes, the source open in an editor: (a) a
+ * highlight becomes a `\pdfmark` with an id, which is the annotation's /NM, and the editor
+ * shows it; (b) a note on it is the macro's note; (c) deleting it removes the macro; (d)
+ * Ctrl+Z brings it back with the same id; (e) while the source has unsaved changes nothing
+ * is written, and once it is saved the sync runs.
+ * @param {any} ext
+ */
+async function sourceSync(ext) {
+  const editCommand = process.env.VSCODE_PDF_MCP_EDIT_COMMAND;
+  const skip = (/** @type {string} */ why) => console.log(`integration: marks into the LaTeX source SKIPPED: ${why}`);
+  if (!editCommand || !python) return skip("needs pdf-reader-writer-edit and VPDF_PYTHON");
+  if (!process.env.VPDF_LATEX) return skip("pdflatex is not installed");
+  const { viewer } = ext.exports;
+  const probe = await viewer.marking.probe();
+  if (!probe.ok || probe.version < 2) return skip(`the edit service speaks protocol ${probe.version ?? "?"}, sync needs 2`);
+  const kpse = (/** @type {string} */ f) => (spawnSync("kpsewhich", [f], { encoding: "utf8" }).stdout || "").trim();
+  /** @type {NodeJS.ProcessEnv} */
+  let env = process.env;
+  const styDir = process.env.VPDF_PDFNOTES_DIR || "";
+  if (styDir && fs.existsSync(path.join(styDir, "pdfnotes.sty"))) {
+    env = { ...process.env, TEXINPUTS: `${styDir}${path.delimiter}${process.env.TEXINPUTS || ""}` };
+  } else if (!kpse("pdfnotes.sty")) {
+    return skip("pdfnotes.sty not found (VPDF_PDFNOTES_DIR, a pdf-reader-writer-mcp checkout next to this one, or kpsewhich)");
+  }
+  if (!kpse("todonotes.sty")) return skip("todonotes is not installed");
+  const { compile } = require("../helpers/latex");
+  const { chromium } = require("playwright-core");
+
+  const proj = path.join(workspace, "notes");
+  const main = path.join(proj, "main.tex");
+  const pdf = path.join(proj, "main.pdf");
+  const FIRST = "Reachability of timed automata is decidable via regions.";
+  const SECOND = "A second sentence stands in a paragraph of its own.";
+  compile(proj, { "main.tex": [
+    "\\documentclass[11pt]{article}",
+    "\\usepackage{todonotes}",
+    "\\usepackage{pdfnotes}",
+    "\\begin{document}",
+    "\\section{Marks}",
+    FIRST,
+    "",
+    SECOND,
+    "\\end{document}",
+    "",
+  ].join("\n") }, "main.tex", { runs: 2, env });
+  const real = fs.realpathSync(pdf);
+  const source = () => fs.readFileSync(main, "utf8");
+  const original = source();
+  /** The file on disk once `fn(its \pdfmarks, text)` holds. @param {(m: ReturnType<typeof pdfmarks>, t: string) => any} fn @param {string} what */
+  const onSource = (fn, what) => waitFor(() => fn(pdfmarks(source()), source()) && source(), `${what}; main.tex:\n${source()}`);
+
+  // the source open in an editor, unchanged: it follows what the sync writes
+  const doc = await vscode.workspace.openTextDocument(main);
+  await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Two, preview: false });
+  await vscode.commands.executeCommand("vscode.open", vscode.Uri.file(pdf), { viewColumn: vscode.ViewColumn.One });
+  await waitFor(() => panelFor(pdf)?.pages === 1, "notes/main.pdf loaded");
+  await waitFor(() => viewer.synctex.peek(real), "SyncTeX data of notes/main.pdf");
+
+  // count the syncs: one per action, none from the reloads they cause (they write the /NM)
+  const ss = viewer.marking.sourceSync;
+  const request = ss.hooks.request;
+  let syncs = 0;
+  ss.hooks.request = (/** @type {string} */ p) => {
+    syncs++;
+    return request(p);
+  };
+  const browser = await chromium.connectOverCDP(`http://127.0.0.1:${process.env.VPDF_CDP_PORT}`);
+  try {
+    const found = await webviewFrame(browser, "/ 1");
+    if (!found) return skip(`the webview is not reachable over CDP here (VS Code ${vscode.version})`);
+    const { page, frame: f } = found;
+    await f.waitForSelector("#markTools .tool:not([disabled])", { timeout: 15000 });
+    const { select, clickAnnot, clickBlank } = markActions(page, f);
+
+    // (a) highlight the first sentence: a \pdfmark around it, its id in the annotation's /NM
+    await select(1, FIRST);
+    await f.locator(".miniBar:visible .styleButton[data-style='highlight']").click();
+    await onSource((m) => m.length === 1 && m[0].text === FIRST && m[0].id, "(a) a \\pdfmark around the highlighted words");
+    const [mark] = pdfmarks(source());
+    assert.match(mark.opts, new RegExp(`author=${me}`));
+    assert.equal(mark.note, "");
+    const hl = await onDisk(pdf, (a) => a.find((x) => x.subtype === "Highlight" && x.nm === `pdfnotes:${mark.id}`), "(a) the /NM");
+    assert.equal(source(), original.replace(FIRST, `\\pdfmark[${mark.opts}]{${FIRST}}{}`), "(a) nothing else changed");
+    await waitFor(() => doc.getText() === source() && !doc.isDirty, "(a) the open editor shows the macro");
+    await delay(1000);
+    assert.equal(syncs, 1, "(a) one sync, and none after the reload it caused");
+
+    // (b) a note on it: the macro's note
+    await clickAnnot(hl.xref);
+    await f.locator(`.popover .item[data-id='${hl.xref}R'] > .actions .editButton`).click();
+    await f.locator(".popover textarea.editNote").fill("Cite the region construction.");
+    await f.locator(".popover textarea.editNote").press("Enter");
+    await onSource((m) => m.length === 1 && m[0].id === mark.id && m[0].note === "Cite the region construction.", "(b) the note in the macro");
+
+    // (c) delete it: the macro goes, the words stay
+    await clickBlank();
+    await clickAnnot(hl.xref);
+    await f.locator(`.popover .item[data-id='${hl.xref}R'] > .actions .deleteButton`).click();
+    await onSource((m, t) => m.length === 0 && t === original, "(c) the macro removed");
+
+    // (d) Ctrl+Z: the mark is back, and so is its macro, with the same id and note
+    await clickBlank();
+    await page.keyboard.press("Control+z");
+    await onSource((m) => m.length === 1 && m[0].id === mark.id && m[0].text === FIRST && m[0].note === "Cite the region construction.",
+      "(d) the macro back after undo");
+    await onDisk(pdf, (a) => a.find((x) => x.subtype === "Highlight" && x.nm === `pdfnotes:${mark.id}`), "(d) the restored /NM");
+    await waitFor(() => doc.getText() === source(), "(d) the editor follows");
+
+    // (e) unsaved changes in the source: a mark is not written into it until it is saved
+    const ed = await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Two, preserveFocus: true });
+    const end = doc.lineAt(doc.lineCount - 1).range.end;
+    assert.ok(await ed.edit((b) => b.insert(end, "% an unsaved line\n")));
+    assert.ok(doc.isDirty);
+    const before = source();
+    await select(1, SECOND);
+    await f.locator(".miniBar:visible .styleButton[data-style='highlight']").click();
+    await onDisk(pdf, (a) => a.filter((x) => x.subtype === "Highlight" && x.author === me).length === 2, "(e) the second highlight");
+    await waitFor(() => viewer.marking.sourceSync.isPending(real), "(e) the sync pending");
+    await delay(1500);
+    assert.equal(source(), before, "(e) the source untouched while unsaved");
+    assert.ok(viewer.marking.sourceSync.isPending(real));
+    assert.ok(await doc.save());
+    const saved = await onSource((m) => m.length === 2 && m.some((x) => x.text === SECOND), "(e) the macro after saving");
+    assert.match(saved, /% an unsaved line\n$/, "(e) the saved edit kept");
+    assert.equal(viewer.marking.sourceSync.isPending(real), false);
+    await waitFor(() => doc.getText() === source() && !doc.isDirty, "(e) the editor follows");
+    await delay(1000);
+    assert.equal(syncs, 5, "one sync per action");
+  } finally {
+    ss.hooks.request = request;
+    await browser.close().catch(() => {});
+  }
 }
 
 /** The middle of a rect, as [x, y]. @param {number[]} r @returns {[number, number]} */

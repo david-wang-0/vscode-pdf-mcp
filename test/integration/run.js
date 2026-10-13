@@ -12,7 +12,10 @@
  * pdf-reader-writer-mcp: its edit service (VSCODE_PDF_MCP_EDIT_COMMAND, else
  * `pdf-reader-writer-edit` on PATH), its MCP server for the concurrency test (VPDF_PRW_MCP,
  * else `pdf-reader-writer-mcp` on PATH) and a Python with pymupdf to read the PDFs back
- * (VPDF_PYTHON). Without them that part is skipped, with a message.
+ * (VPDF_PYTHON). Without them that part is skipped, with a message. Marks into the LaTeX
+ * source also need protocol 2 of the edit service and pdfnotes.sty: VPDF_PDFNOTES_DIR (a
+ * directory with it), else the latex/ directory of a pdf-reader-writer-mcp checkout next to
+ * this one, else wherever kpsewhich finds it.
  */
 "use strict";
 
@@ -65,6 +68,10 @@ async function main() {
   const cdpPort = await freePort();
   const editCommand = process.env.VSCODE_PDF_MCP_EDIT_COMMAND || which("pdf-reader-writer-edit", process.env) || "";
   const mcpCommand = process.env.VPDF_PRW_MCP || which("pdf-reader-writer-mcp", process.env) || "";
+  // pdfnotes.sty for the marks-into-source test: VPDF_PDFNOTES_DIR, else the latex/ of a
+  // pdf-reader-writer-mcp checkout next to this one (its pdfnotes worktree first)
+  const pdfnotesDir = process.env.VPDF_PDFNOTES_DIR || ["pdf-reader-writer-mcp-pdfnotes", "pdf-reader-writer-mcp"]
+    .map((d) => path.join(root, "..", d, "latex")).find((d) => fs.existsSync(path.join(d, "pdfnotes.sty"))) || "";
   // Keys the viewer handles are bound in VS Code too, to a visible command: if the viewer
   // let one through, an untitled editor would appear. "k" (not the viewer's) is the control.
   const user = path.join(tmp, "user-data", "User");
@@ -113,6 +120,7 @@ async function main() {
         VPDF_PRW_MCP: mcpCommand,
         VPDF_PYTHON: process.env.VPDF_PYTHON || "",
         VPDF_LATEX: HAVE_PDFLATEX ? "1" : "",
+        VPDF_PDFNOTES_DIR: pdfnotesDir,
       },
     });
     const left = fs.readdirSync(stateDir);

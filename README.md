@@ -13,7 +13,9 @@ Three parts, one npm package:
    strikeout, margin notes and replies (see [Marking](#marking)). For LaTeX documents it
    does SyncTeX, down to the word: Ctrl+click jumps to the word in the source, forward
    search shows the word at the cursor in the PDF (also from LaTeX Workshop), and a
-   selection carries its source lines (see [SyncTeX](#synctex)).
+   selection carries its source lines (see [SyncTeX](#synctex)). With the pdfnotes
+   package, your marks are copied into the LaTeX source as you make them (see
+   [Marks into the LaTeX source](#marks-into-the-latex-source)).
 2. **An MCP stdio server**, `vscode-pdf-mcp` (server name `vscode-pdf`), with the tools
    `viewer_state`, `get_selection` and `goto`.
 3. **A Claude Code `UserPromptSubmit` hook**, `vscode-pdf-mcp-hook`, that adds one line of
@@ -173,6 +175,7 @@ installed (`vscode.openWith(uri, 'pdfExternalOpen.editor')`), and otherwise run 
 | `vscodePdfMcp.editCommand` | `pdf-reader-writer-edit` | The edit service every mark is written through (looked up on `PATH` unless absolute) |
 | `vscodePdfMcp.editArgs` | `[]` | Its arguments |
 | `vscodePdfMcp.author` | your login name | The author (`/T`) of your marks, and whose marks you may edit and delete |
+| `vscodePdfMcp.syncMarksToSource` | `true` | Copy the marks into the LaTeX source after each of your actions (see [Marks into the LaTeX source](#marks-into-the-latex-source)) |
 | `vscodePdfMcp.keys` | see [Marking](#marking) | Shortcuts, e.g. `{"highlight": "shift+h", "undo": "ctrl+z"}` |
 
 Environment variables (server, hook and extension host alike):
@@ -261,9 +264,47 @@ same moment never lose each other. Selections go over as rects in PDF user space
 service is restarted on the next action if it dies; if it is missing or speaks a
 protocol version older than 1, the mark tools are disabled with the reason in their
 tooltips and one warning per window (a newer version is accepted: versions add ops and
-fields). Requests are answered one at a time, and each has 30 s from when the service gets
-to it. The extension never writes PDF bytes itself and does not use pdf.js's
+fields; marks go into the LaTeX source from version 2 on). Requests are answered one at a
+time, and each has 30 s (a `sync`, 120 s) from when the service gets to it. The extension never writes PDF bytes itself and does not use pdf.js's
 annotation editor.
+
+### Marks into the LaTeX source
+
+Marks in a PDF built from LaTeX are gone after the next build. For a document whose
+sources load the [pdfnotes](https://github.com/david-wang-0/pdf-reader-writer-mcp/blob/main/latex/README.md)
+package (part of pdf-reader-writer-mcp), the viewer therefore copies the marks into the
+source as you make them: after each mark, note, reply, edit, deletion or undo, the edit
+service's `sync` writes the PDF's highlights and notes as `\pdfmark[id=…,…]{marked
+words}{note}` and `\pdfnote[…]{text}` macros where SyncTeX places them (replies after their
+parent, with `replyto=`), brings the macros of changed marks up to date and removes those of
+marks deleted in the viewer. Each annotation gets its macro's id as its `/NM`
+(`pdfnotes:<id>`), so the rebuilt document has the same marks again, and undoing a deletion
+puts the macro back with the same id. The status bar names the files it changed
+(*Marks copied into paper.tex*); an editor showing such a file without unsaved changes
+reloads it from disk by itself.
+
+- **When**: 0.3 s after the last of a burst of actions, one sync at a time per PDF, only
+  when `X.synctex.gz` or `X.synctex` lies next to `X.pdf` and the edit service speaks
+  protocol 2 or newer.
+- **Never over unsaved edits**: while a source of the PDF (a file in its SyncTeX data;
+  without data, a LaTeX file under the PDF's directory) has unsaved changes in an editor,
+  the sync waits. It runs when they are saved, reverted or closed without saving, and not
+  before.
+- **No pdfnotes**: when no source loads the package, nothing is written. One message per
+  PDF and window says so, with a button for the package's README, and the viewer does not
+  try again until the document is rebuilt (its SyncTeX file changes). Any other failure
+  shows one warning per PDF; the output channel has the details of each sync.
+- **Builds**: pdfnotes places its annotations from positions recorded in the run before,
+  so a build needs two LaTeX runs (latexmk, LaTeX Workshop and Overleaf do that). A build
+  that was already under way when the sync wrote the source (one started by saving it, say)
+  does not have the new marks; they are safe in the source and come with the next build.
+- **What**: the sync copies every highlight and note of the PDF, not only yours: the
+  agent's marks go into the source too.
+- **Where**: a new macro goes where the SyncTeX data of the last build puts the mark,
+  looking for its words a few lines around. Saved edits that move lines put that off until
+  the next build: a new mark may then be written as a `\pdfnote` next to the text instead
+  of a `\pdfmark` around it.
+- Off with `"vscodePdfMcp.syncMarksToSource": false`.
 
 ## SyncTeX
 
@@ -471,6 +512,7 @@ matching an anchor; shared by the webview and the extension), `bin/open.js` (the
 
 Marking code: `extension/editservice.js` (the service client: spawn, framing, ids,
 restart), `extension/marks.js` (requests, per-document write queue and undo stack),
+`extension/sourcesync.js` (when the `sync` of the marks into the LaTeX source runs),
 `media/annotate.mjs` (the UI), `media/marking.mjs` and `media/keys.mjs` (palette,
 geometry, threads, shortcuts; shared with the unit tests).
 
@@ -522,7 +564,10 @@ npm run test:integration      # a real VS Code under xvfb-run (skipped without x
   `wl-paste`/`xclip`/`xsel` scripts on a temporary `PATH`. The marking units (service
   client, request checks, ownership, undo stack and its xref remapping, palette, geometry,
   threads, keys) run against `test/helpers/fake-edit-service.js`, a stand-in for
-  `pdf-reader-writer-edit` that speaks the same protocol. The SyncTeX parser is checked
+  `pdf-reader-writer-edit` that speaks the same protocol. The scheduling of the marks'
+  sync into the LaTeX source (debounce, one at a time, pending while a source is unsaved
+  and run on save, protocol and SyncTeX checks, the no-pdfnotes memory until a rebuild) is
+  tested with stub hooks. The SyncTeX parser is checked
   against the `synctex` CLI as an oracle on a small multi-file LaTeX project compiled with
   `pdflatex -synctex=1` (`test/helpers/latex.js`: `\input`, a wrapped paragraph, display
   math, a list, two columns, two pages): reverse search on points over the text and on a
@@ -570,11 +615,19 @@ npm run test:integration      # a real VS Code under xvfb-run (skipped without x
   mark of both is there; a control run against a writer that skips the lock logs what it
   loses. This part needs `pdf-reader-writer-edit` (`VSCODE_PDF_MCP_EDIT_COMMAND` or `PATH`),
   `pdf-reader-writer-mcp` (`VPDF_PRW_MCP` or `PATH`) and `VPDF_PYTHON`, and is skipped
-  without them. On VS Code 1.90, Playwright cannot reach the webview's frame, so the
-  mouse-and-keyboard steps are skipped there.
+  without them. Marks into the LaTeX source: a document that loads todonotes and pdfnotes,
+  built with two `pdflatex` runs, its source open in an editor; a highlight made with the
+  mouse becomes a `\pdfmark` with an id that is the annotation's `/NM`, and the editor
+  shows it; a note on it, its deletion and Ctrl+Z follow in the source (the macro back
+  with the same id); with unsaved changes in the source, a mark leaves the file alone until
+  it is saved; one sync per action, none from the reloads they cause. It also needs
+  protocol 2 of the edit service and pdfnotes.sty (from `VPDF_PDFNOTES_DIR`, else the
+  `latex/` directory of a pdf-reader-writer-mcp checkout next to this one, else wherever
+  `kpsewhich` finds it), and is skipped without them. On VS Code 1.90, Playwright cannot
+  reach the webview's frame, so the mouse-and-keyboard steps are skipped there.
 - `node scripts/serve-webview.js some.pdf 8000` serves the webview for a browser by hand.
 - Plain JavaScript with `// @ts-check` and JSDoc types, no build step. vscode-free logic
-  lives in `lib/` and `extension/{state,ipc,html,editservice,marks,synctexstore}.js`;
+  lives in `lib/` and `extension/{state,ipc,html,editservice,marks,sourcesync,synctexstore}.js`;
   `extension/extension.js` is the glue.
 
 ## License
