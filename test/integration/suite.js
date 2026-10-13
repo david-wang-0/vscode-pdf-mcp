@@ -752,11 +752,11 @@ async function wordLevel({ f, page, main, pdf, mainEd }) {
   onWord(await flashed(), await wordRect("spans several", "several"), "(d) forward search from a caption's first line");
 }
 
-/** The entry in the editor context menu: the title only (the palette shows "SyncTeX: show in PDF"). */
-const MENU_ENTRY = /^show in PDF$/;
+/** The entry in the editor context menu: the title only (the palette shows "SyncTeX: Show in PDF"; VS Code drops the category in context menus). */
+const MENU_ENTRY = /^Show in PDF$/;
 
 /**
- * "SyncTeX: show in PDF" in a text editor's right-click menu, with the real mouse: (e) on
+ * "SyncTeX: Show in PDF" in a text editor's right-click menu, with the real mouse: (e) on
  * a word, the right-click puts the cursor there and the entry flashes that word; (f)
  * inside a two-word selection, the selection stays and both words flash; (g) a Markdown
  * editor's menu has no such entry.

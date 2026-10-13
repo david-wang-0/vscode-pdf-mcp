@@ -289,7 +289,7 @@ writing it), and dropped when it disappears.
   or the text group you used last, else in a new group beside the PDF; never in the PDF
   tab's own group. Ctrl+click on a link does SyncTeX, not the link (a plain click still
   follows links). Without SyncTeX data, Ctrl+click does nothing special.
-- **Forward search** (source line to PDF): **SyncTeX: show in PDF**
+- **Forward search** (source line to PDF): **SyncTeX: Show in PDF**
   (`vscodePdfMcp.synctexForward`, in a `.tex` editor's right-click menu and command
   palette; bind a key to it if you like) takes the line and the word at the cursor (or
   the words of a selection within the line). A right-click puts the cursor where you
@@ -336,7 +336,7 @@ word is looked for with about six words of context on each side:
 A word that occurs more than once is told apart by its context. When two places are about
 as good, or the word is not found, it stays at the line: the cursor at the line's start,
 the flash on the whole line. The column of a forward search comes from the cursor (or
-the selection) for *SyncTeX: show in PDF*, from `--column` for `vscode-pdf-mcp-open`, and
+the selection) for *SyncTeX: Show in PDF*, from `--column` for `vscode-pdf-mcp-open`, and
 otherwise, as for LaTeX Workshop, which passes no column, from a text editor that shows
 the file with its cursor on that line (the active editor first); without one, it is the
 line. Limits: math (`$...$`, display math) is opaque, since the PDF prints symbols, and
@@ -428,7 +428,7 @@ per connection (mode 0600):
 | `{"op":"state"}` | `{"ok":true,"state":{...}}` (as in the state file) |
 | `{"op":"goto","path":"/abs/paper.pdf" or null,"page":3}` | `{"ok":true,"entry":{...}}` or `{"ok":false,"error":"<message>"}` |
 | `{"op":"open","path":"/abs/paper.pdf"}` | the same: opens the PDF (beside the active editor, keeping the focus) or reveals its tab |
-| `{"op":"synctexForward","tex":"/abs/paper.tex","line":42,"column"?:0,"pdf"?:"/abs/paper.pdf"}` | the same, after the SyncTeX forward search: scrolled there and flashed (the word at the 0-based `column`, else at the cursor of an editor on that line, else the line); without `pdf` the window finds the PDF as *SyncTeX: show in PDF* does |
+| `{"op":"synctexForward","tex":"/abs/paper.tex","line":42,"column"?:0,"pdf"?:"/abs/paper.pdf"}` | the same, after the SyncTeX forward search: scrolled there and flashed (the word at the 0-based `column`, else at the cursor of an editor on that line, else the line); without `pdf` the window finds the PDF as *SyncTeX: Show in PDF* does |
 
 For `goto`, the server resolves the path (default: the active entry's), checks that it
 exists and, when a tab has it open, the page range, and sends the request to the window that
@@ -552,7 +552,7 @@ npm run test:integration      # a real VS Code under xvfb-run (skipped without x
   `cannot open`), replace-by-rename reloads of a background tab,
   the hook, and *Open in Okular* against a fake command; with `pdflatex`, a LaTeX project
   compiled into the workspace: Ctrl+click with the real mouse opens the `\input` file at
-  the line, *SyncTeX: show in PDF* and `vscode-pdf-mcp-open --tex` scroll the PDF, both
+  the line, *SyncTeX: Show in PDF* and `vscode-pdf-mcp-open --tex` scroll the PDF, both
   down to the word (the flash on the word's text-layer box, the cursor on the clicked
   word, the column from the editor's cursor when the request has none, a word of a
   three-line caption both ways), the entry in a `.tex` editor's right-click menu (custom,

@@ -894,7 +894,7 @@ async function activate(context) {
     vscode.commands.registerCommand("vscodePdfMcp.synctexForward", async () => {
       const ed = vscode.window.activeTextEditor;
       if (!ed || ed.document.uri.scheme !== "file") {
-        void vscode.window.showWarningMessage("SyncTeX: show in PDF needs a .tex file in the active editor");
+        void vscode.window.showWarningMessage("SyncTeX: Show in PDF needs a .tex file in the active editor");
         return undefined;
       }
       const sel = ed.selection;

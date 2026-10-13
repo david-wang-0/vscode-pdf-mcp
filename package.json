@@ -53,7 +53,7 @@
       },
       {
         "command": "vscodePdfMcp.synctexForward",
-        "title": "show in PDF",
+        "title": "Show in PDF",
         "category": "SyncTeX"
       }
     ],
