@@ -15,9 +15,10 @@ const path = require("node:path");
 const zlib = require("node:zlib");
 const { spawnSync } = require("node:child_process");
 const { parseSynctex, loadSynctex, synctexFileFor } = require("../lib/synctex");
-const { HAVE_PDFLATEX, HAVE_SYNCTEX, buildProject } = require("./helpers/latex");
+const { HAVE_PDFLATEX, HAVE_SYNCTEX, HAVE_PDFTOTEXT, buildProject, compile, wordBoxes } = require("./helpers/latex");
 
 const SKIP_TEX = !HAVE_PDFLATEX && "pdflatex is not installed";
+const SKIP_WORDS = SKIP_TEX || (!HAVE_PDFTOTEXT && "pdftotext is not installed");
 const SKIP_ORACLE = SKIP_TEX || (!HAVE_SYNCTEX && "the synctex command line tool is not installed");
 
 /** @type {string} */
@@ -148,10 +149,11 @@ test("parse: gzip or plain, the newer of .synctex.gz and .synctex, relative inpu
   assert.ok(Math.abs(small.unit - 2 / 65781.76) < 1e-12, "magnification 2000 doubles the unit");
   // v of the "=" records is the hbox's 500000. Between the kern (line 3, after the
   // heading boundary took its line) and the boundary of line 4: SyncTeX reports both,
-  // the smaller line first; the text under the point ends at the boundary, so it is 4.
+  // the smaller line first (`results`, as the CLI); the text under the point ends at the
+  // boundary, so the primary result is 4, where `synctex edit` would print 3 first.
   const hit = small.edit(1, 650000 * small.unit, 480000 * small.unit);
   assert.deepEqual(hit?.results.map((r) => r.line), [3, 4]);
-  assert.deepEqual([hit?.file, hit?.line], [path.join(plain, "a.tex"), 3]);
+  assert.deepEqual([hit?.file, hit?.line], [path.join(plain, "a.tex"), 4]);
   assert.equal(small.textAt(1, 650000 * small.unit, 480000 * small.unit)?.line, 4);
   assert.equal(small.textAt(1, 250000 * small.unit, 480000 * small.unit)?.line, 3, "a heading boundary takes the next node's line");
 });
@@ -165,7 +167,7 @@ test("reverse: same file and line as `synctex edit` on points over the text", { 
   const diffs = [];
   for (const [page, x, y] of pts) {
     const want = cliEdit(page, x, y)[0];
-    const got = data.edit(page, x, y);
+    const got = data.edit(page, x, y)?.results[0];
     if (want && got && want.file === got.file && want.line === got.line) same++;
     else if (!want && !got) same++;
     else diffs.push(`p${page} (${x.toFixed(1)}, ${y.toFixed(1)}): cli ${want ? `${path.basename(want.file)}:${want.line}` : "none"}, ours ${got ? `${path.basename(got.file)}:${got.line}` : "none"}`);
@@ -184,7 +186,7 @@ test("reverse: same file and line as `synctex edit` on a grid over whole pages (
       for (let y = 20; y < 842; y += 23) {
         n++;
         const want = cliEdit(page, x, y)[0];
-        const got = data.edit(page, x, y);
+        const got = data.edit(page, x, y)?.results[0];
         if ((!want && !got) || (want && got && want.file === got.file && want.line === got.line)) continue;
         diffs.push(`p${page} (${x}, ${y}): cli ${want ? `${path.basename(want.file)}:${want.line}` : "none"}, ours ${got ? `${path.basename(got.file)}:${got.line}` : "none"}`);
       }
@@ -224,6 +226,55 @@ test("reverse: a point on the input file's text maps to that file", { skip: SKIP
   const hit = data.edit(v.page, (l + r) / 2, (t + b) / 2);
   assert.deepEqual([hit?.file, hit?.line], [project.chapter, 2]);
   assert.equal(data.edit(99, 100, 100), null, "no such page");
+});
+
+test("reverse, forward: every word of a paragraph over several source lines maps to its own line", { skip: SKIP_WORDS }, async () => {
+  // pdfTeX tags the boundary that ends a source line's first word with the line before;
+  // the parser takes the following node's line, so hover, click, selection and the flash
+  // of a forward search all put that word on its own line.
+  const lines = [
+    "alpha bravo charlie delta",
+    "echo foxtrot golf hotel",
+    "india juliett kilo lima",
+    "mike november oscar papa",
+    "quebec romeo sierra tango",
+  ];
+  const first = 3; // the source line of lines[0]
+  const sub = path.join(dir, "words");
+  compile(sub, { "main.tex": ["\\documentclass{article}", "\\begin{document}", ...lines, "\\end{document}", ""].join("\n") });
+  const main = path.join(sub, "main.tex");
+  const loaded = await loadSynctex(path.join(sub, "main.pdf"));
+  assert.ok(loaded);
+  const d = loaded.data;
+  const words = wordBoxes(path.join(sub, "main.pdf")).filter((w) => /^[a-z]+$/.test(w.word)); // not the page number
+  assert.equal(words.length, 20);
+  /** @param {number[]} r @param {number[]} w */
+  const covers = (r, w) => r[0] <= w[0] + 0.5 && r[2] >= w[2] - 0.5 && r[1] <= (w[1] + w[3]) / 2 && (w[1] + w[3]) / 2 <= r[3];
+  const wrapped = new Set(words.map((w) => Math.round(w.box[1]))).size > 1;
+  assert.ok(wrapped, "the paragraph wraps");
+  for (const { page, word, box } of words) {
+    const line = first + lines.findIndex((l) => l.split(" ").includes(word));
+    const [x0, y0, x1, y1] = box;
+    for (const x of [(x0 + x1) / 2, x0 + 0.5, x1 - 0.5]) {
+      const y = y0 + 0.7 * (y1 - y0);
+      const hit = d.edit(page, x, y);
+      assert.deepEqual([hit?.file, hit?.line], [main, line], `edit on "${word}" at x ${x.toFixed(1)}`);
+      assert.equal(d.textAt(page, x, y)?.line, line, `textAt on "${word}"`);
+      if (lines[line - first].startsWith(word)) assert.ok(hit?.rects.some((r) => covers(r, box)), `the underline ${JSON.stringify(hit?.rects)} covers "${word}" ${JSON.stringify(box)}`);
+    }
+  }
+  for (let i = 0; i < lines.length; i++) {
+    const v = d.view(main, first + i);
+    assert.ok(v);
+    const own = /** @type {(typeof words)[0]} */ (words.find((w) => w.word === lines[i].split(" ")[0]));
+    assert.ok(v.rects.some((r) => covers(r, own.box)), `the flash of line ${first + i} covers "${own.word}"`);
+    const next = words.find((w) => i + 1 < lines.length && w.word === lines[i + 1].split(" ")[0]);
+    if (next) {
+      const [x0, y0, x1, y1] = next.box;
+      const inner = [x0 + 1, y0 + 1, x1 - 1, y1 - 1];
+      assert.ok(!v.rects.some((r) => overlaps(r, inner, 0)), `the flash of line ${first + i} leaves out "${next.word}"`);
+    }
+  }
 });
 
 // ---- forward search --------------------------------------------------------------------

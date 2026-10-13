@@ -302,7 +302,13 @@ writing it), and dropped when it disappears.
 Reverse and forward search follow the rules of SyncTeX's own parser (Jérôme Laurens's
 `synctex_parser.c`, ported to JavaScript), so they land where `synctex edit` and
 `synctex view` (and so Okular, Zathura and LaTeX Workshop's viewer) land;
-`test/synctex.test.js` checks that on a compiled document.
+`test/synctex.test.js` checks that on a compiled document. One deliberate difference: pdfTeX
+tags the boundary after the first word of a source line with the line before, so
+`synctex edit` gives that word the previous line. The viewer takes the line of the node
+after the boundary instead, so hover, Ctrl+click, selections and the forward-search flash
+put a source line's first word on its own line (where Ctrl+click can then differ from
+`synctex edit`'s first result). Text inside a macro argument (a caption, a footnote) still
+maps to the argument's last line: TeX reads the whole argument before typesetting it.
 
 ### From other tools: `vscode-pdf-mcp-open`
 

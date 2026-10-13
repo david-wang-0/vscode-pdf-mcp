@@ -11,9 +11,10 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { which } = require("../../lib/backend");
 
-/** Is pdflatex installed (and the synctex CLI, for the oracle)? */
+/** Is pdflatex installed (and the synctex CLI, for the oracle; pdftotext, for word boxes)? */
 const HAVE_PDFLATEX = !!which("pdflatex", process.env);
 const HAVE_SYNCTEX = !!which("synctex", process.env);
+const HAVE_PDFTOTEXT = !!which("pdftotext", process.env);
 
 /** @param {string} [extraChapterLines] lines inserted at the top of chapters/one.tex (rebuild tests) */
 function projectFiles(extraChapterLines = "") {
@@ -78,14 +79,7 @@ function projectFiles(extraChapterLines = "") {
  * @returns {{pdf: string, main: string, chapter: string, synctex: string}}
  */
 function buildProject(dir, { extraChapterLines = "" } = {}) {
-  for (const [rel, text] of Object.entries(projectFiles(extraChapterLines))) {
-    const file = path.join(dir, rel);
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, text);
-  }
-  const r = spawnSync("pdflatex", ["-synctex=1", "-interaction=nonstopmode", "-halt-on-error", "main.tex"],
-    { cwd: dir, encoding: "utf8", timeout: 60000 });
-  if (r.status !== 0) throw new Error(`pdflatex failed (${r.status}):\n${(r.stdout || "").slice(-2000)}`);
+  compile(dir, projectFiles(extraChapterLines));
   return {
     pdf: path.join(dir, "main.pdf"),
     main: path.join(dir, "main.tex"),
@@ -94,4 +88,41 @@ function buildProject(dir, { extraChapterLines = "" } = {}) {
   };
 }
 
-module.exports = { HAVE_PDFLATEX, HAVE_SYNCTEX, projectFiles, buildProject };
+/**
+ * Write `files` (relative path -> text) into `dir` and compile `main` there with
+ * `pdflatex -synctex=1`.
+ * @param {string} dir @param {Record<string, string>} files @param {string} [main]
+ */
+function compile(dir, files, main = "main.tex") {
+  for (const [rel, text] of Object.entries(files)) {
+    const file = path.join(dir, rel);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, text);
+  }
+  const r = spawnSync("pdflatex", ["-synctex=1", "-interaction=nonstopmode", "-halt-on-error", main],
+    { cwd: dir, encoding: "utf8", timeout: 60000 });
+  if (r.status !== 0) throw new Error(`pdflatex failed (${r.status}):\n${(r.stdout || "").slice(-2000)}`);
+}
+
+/**
+ * The words of `pdf` with their boxes (bp, top-left origin), from `pdftotext -bbox`.
+ * @param {string} pdf @returns {{page: number, word: string, box: [number, number, number, number]}[]}
+ */
+function wordBoxes(pdf) {
+  const r = spawnSync("pdftotext", ["-bbox", pdf, "-"], { encoding: "utf8" });
+  if (r.status !== 0) throw new Error(`pdftotext failed (${r.status}): ${r.stderr}`);
+  /** @type {{page: number, word: string, box: [number, number, number, number]}[]} */
+  const out = [];
+  let page = 0;
+  for (const l of r.stdout.split("\n")) {
+    if (l.includes("<page ")) page++;
+    const m = /xMin="([\d.]+)" yMin="([\d.]+)" xMax="([\d.]+)" yMax="([\d.]+)">([^<]*)</.exec(l);
+    if (m && page) {
+      const [x0, y0, x1, y1] = m.slice(1, 5).map(Number);
+      out.push({ page, word: m[5], box: [x0, y0, x1, y1] });
+    }
+  }
+  return out;
+}
+
+module.exports = { HAVE_PDFLATEX, HAVE_SYNCTEX, HAVE_PDFTOTEXT, projectFiles, buildProject, compile, wordBoxes };
