@@ -545,16 +545,19 @@ npm run test:integration      # a real VS Code under xvfb-run (skipped without x
   underlines and notes (`scripts/make-annotated-pdf.py`) and links.
 - `npm run test:integration` downloads VS Code into `.vscode-test/` with
   `@vscode/test-electron` and runs `test/integration/suite.js` in it with a scratch
-  user-data and extensions directory, under `xvfb-run` with `WAYLAND_DISPLAY` unset, so no
-  window appears on your desktop. `VSCODE_VERSION=1.90.0` tests the oldest supported VS
-  Code. It opens generated PDFs, checks the state file, goto over the socket (including
-  opening a closed file and `cannot open`), replace-by-rename reloads of a background tab,
+  user-data and extensions directory, under `xvfb-run` with `WAYLAND_DISPLAY` and
+  `XDG_SESSION_TYPE` unset and Electron pinned to X11, so no window appears on your
+  desktop. `VSCODE_VERSION=1.90.0` tests the oldest supported VS Code. It opens generated
+  PDFs, checks the state file, goto over the socket (including opening a closed file and
+  `cannot open`), replace-by-rename reloads of a background tab,
   the hook, and *Open in Okular* against a fake command; with `pdflatex`, a LaTeX project
   compiled into the workspace: Ctrl+click with the real mouse opens the `\input` file at
   the line, *SyncTeX: show in PDF* and `vscode-pdf-mcp-open --tex` scroll the PDF, both
   down to the word (the flash on the word's text-layer box, the cursor on the clicked
   word, the column from the editor's cursor when the request has none, a word of a
-  three-line caption both ways), a selection gives `tex` and `Source:`, and a rebuild
+  three-line caption both ways), the entry in a `.tex` editor's right-click menu (custom,
+  DOM-drawn menus in the test settings) on a word and on a selection, and not in a Markdown
+  editor's menu, a selection gives `tex` and `Source:`, and a rebuild
   refreshes the SyncTeX data. VS Code
   runs with a remote-debugging port and the suite drives the webview with real mouse and
   keyboard input over CDP: it marks a selection, replies to an agent note, edits and

@@ -33,9 +33,12 @@ if (!process.env.VPDF_UNDER_XVFB) {
   }
   /** @type {NodeJS.ProcessEnv} */
   const env = { ...process.env, VPDF_UNDER_XVFB: "1" };
-  // Make sure Electron uses the Xvfb display, never the user's Wayland session.
+  // Make sure Electron uses the Xvfb display, never the user's Wayland session: without
+  // WAYLAND_DISPLAY it still picks Wayland from XDG_SESSION_TYPE and connects to the
+  // default socket, so the window showed on the desktop. X11 is pinned below as well.
   delete env.WAYLAND_DISPLAY;
   delete env.ELECTRON_OZONE_PLATFORM_HINT;
+  delete env.XDG_SESSION_TYPE;
   delete env.DISPLAY;
   const r = spawnSync(xvfb, ["-a", "-s", "-screen 0 1280x900x24", process.execPath, __filename], { env, stdio: "inherit" });
   process.exit(r.status ?? 1);
@@ -69,6 +72,9 @@ async function main() {
   const when = "activeCustomEditorId == 'vscodePdfMcp.viewer'";
   fs.writeFileSync(path.join(user, "keybindings.json"), JSON.stringify(["ctrl+z", "h", "k"].map((key) =>
     ({ key, command: "workbench.action.files.newUntitledFile", when }))));
+  // Menus drawn in the workbench DOM, not by the OS, so the suite can right-click an editor
+  // and pick from its context menu (window.menuStyle, where this VS Code has it).
+  fs.writeFileSync(path.join(user, "settings.json"), JSON.stringify({ "window.titleBarStyle": "custom", "window.menuStyle": "custom" }));
   const workspace = path.join(tmp, "workspace");
   const stateDir = path.join(tmp, "state");
   fs.mkdirSync(workspace);
@@ -94,6 +100,7 @@ async function main() {
         "--skip-release-notes",
         "--disable-gpu",
         "--no-sandbox",
+        "--ozone-platform=x11", // the Xvfb display (see above)
         `--remote-debugging-port=${cdpPort}`,
       ],
       extensionTestsEnv: {

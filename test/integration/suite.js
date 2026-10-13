@@ -6,8 +6,8 @@
  * service, marking with real mouse and keyboard input over CDP: mark, reply, edit,
  * delete, undo, keys kept from VS Code, and concurrent writes with the MCP server.
  * With pdflatex, SyncTeX: Ctrl+click opens the source, forward search from the command
- * and from vscode-pdf-mcp-open, both down to the word, the selection's source lines, and
- * a rebuild.
+ * and from vscode-pdf-mcp-open, both down to the word, the entry in a .tex editor's
+ * right-click menu, the selection's source lines, and a rebuild.
  */
 "use strict";
 
@@ -583,6 +583,8 @@ async function synctex(ext) {
 
     // 4b. Word level, both ways (the page-2 line that repeats "model", the three-line caption).
     if (f && page) await wordLevel({ f, page, main, pdf, mainEd });
+    // 4c. The same from the .tex editor's right-click menu.
+    if (f && page) await contextMenu({ f, page, main, pdf, mainEd });
 
     // 5. A selection: its source lines in the state file (C2 tex) and the hook (C7 Source).
     if (f && page) {
@@ -634,18 +636,10 @@ async function synctex(ext) {
 }
 
 /**
- * Word-level SyncTeX in the real viewer: (a) the command from a cursor on a word flashes
- * that word; (b) Ctrl+click on a word puts the cursor on it; (c) a request without a
- * column (as from LaTeX Workshop) takes the cursor's column; (d) a caption's word, whose
- * text SyncTeX gives the argument's last line, both ways.
- * @param {{f: import("playwright-core").Frame, page: import("playwright-core").Page, main: string, pdf: string,
- *   mainEd: vscode.TextEditor}} ctx
+ * The PDF webview's page-2 words and flashes, for the word-level checks.
+ * @param {import("playwright-core").Frame} f @param {import("playwright-core").Page} page
  */
-async function wordLevel({ f, page, main, pdf, mainEd }) {
-  const lines = fs.readFileSync(main, "utf8").split("\n");
-  const repeated = lines.findIndex((l) => l.startsWith("The word model appears twice")) + 1;
-  const caption = lines.findIndex((l) => l.startsWith("\\caption{")) + 1;
-  assert.ok(repeated > 0 && caption > 0);
+function pdfWords(f, page) {
   /**
    * The frame-client box of the `nth` `word` in the text-layer span of page 2 that contains `text`.
    * @param {string} text @param {string} word @param {number} [nth]
@@ -696,6 +690,23 @@ async function wordLevel({ f, page, main, pdf, mainEd }) {
     await page.mouse.click(x, y);
     await page.keyboard.up("Control");
   };
+  return { wordRect, clearFlash, flashed, onWord, ctrlClick };
+}
+
+/**
+ * Word-level SyncTeX in the real viewer: (a) the command from a cursor on a word flashes
+ * that word; (b) Ctrl+click on a word puts the cursor on it; (c) a request without a
+ * column (as from LaTeX Workshop) takes the cursor's column; (d) a caption's word, whose
+ * text SyncTeX gives the argument's last line, both ways.
+ * @param {{f: import("playwright-core").Frame, page: import("playwright-core").Page, main: string, pdf: string,
+ *   mainEd: vscode.TextEditor}} ctx
+ */
+async function wordLevel({ f, page, main, pdf, mainEd }) {
+  const lines = fs.readFileSync(main, "utf8").split("\n");
+  const repeated = lines.findIndex((l) => l.startsWith("The word model appears twice")) + 1;
+  const caption = lines.findIndex((l) => l.startsWith("\\caption{")) + 1;
+  assert.ok(repeated > 0 && caption > 0);
+  const { wordRect, clearFlash, flashed, onWord, ctrlClick } = pdfWords(f, page);
   /** The editor of `main` once its cursor is at `line` (1-based), `column`. @param {number} line @param {number} column @param {string} what */
   const cursorAt = (line, column, what) => waitFor(() => {
     const e = vscode.window.activeTextEditor;
@@ -726,7 +737,8 @@ async function wordLevel({ f, page, main, pdf, mainEd }) {
   await clearFlash();
   await backend.synctexForward({ tex: main, line: repeated - 1, pdf }, { dir });
   const bars = await flashed();
-  assert.ok(bars.reduce((w, b) => w + b.width, 0) > 150, `(c) the line: ${JSON.stringify(bars)}`);
+  const word = await wordRect("model of the model", "model", 1);
+  assert.ok(bars.reduce((w, b) => w + b.width, 0) > 3 * word.width, `(c) the line: ${JSON.stringify(bars)}, a word ${word.width} wide`);
 
   // (d) the caption: Ctrl+click on "zeppelin" (SyncTeX: the argument's last line) goes to
   //     its own line and column; forward search from "several" flashes that word
@@ -738,6 +750,136 @@ async function wordLevel({ f, page, main, pdf, mainEd }) {
   await clearFlash();
   await vscode.commands.executeCommand("vscodePdfMcp.synctexForward");
   onWord(await flashed(), await wordRect("spans several", "several"), "(d) forward search from a caption's first line");
+}
+
+/** The entry in the editor context menu: the title only (the palette shows "SyncTeX: show in PDF"). */
+const MENU_ENTRY = /^show in PDF$/;
+
+/**
+ * "SyncTeX: show in PDF" in a text editor's right-click menu, with the real mouse: (e) on
+ * a word, the right-click puts the cursor there and the entry flashes that word; (f)
+ * inside a two-word selection, the selection stays and both words flash; (g) a Markdown
+ * editor's menu has no such entry.
+ * @param {{f: import("playwright-core").Frame, page: import("playwright-core").Page, main: string, pdf: string,
+ *   mainEd: vscode.TextEditor}} ctx
+ */
+async function contextMenu({ f, page, main, pdf, mainEd }) {
+  const lines = fs.readFileSync(main, "utf8").split("\n");
+  const prefix = "The word model appears twice";
+  const line = lines.findIndex((l) => l.startsWith(prefix));
+  assert.ok(line >= 0);
+  const text = lines[line];
+  const { wordRect, clearFlash, flashed, onWord } = pdfWords(f, page);
+  /**
+   * The page box of characters [from, to) of the one visible editor line starting with
+   * `start`, once rendered, not covered (by the minimap, say) and in the same place twice
+   * 100 ms apart (the layout settles after a bar closes).
+   * Spaces may be drawn as nbsp, or as dots in a selection.
+   * @param {string} start @param {number} from @param {number} to
+   */
+  const editorRect = async (start, from, to) => {
+    const end = Date.now() + 5000;
+    let last = "";
+    for (;;) {
+      const v = await page.evaluate(([start, from, to]) => {
+        const norm = (/** @type {string} */ s) => s.replace(/[\u00a0\u00b7\u2e31]/g, " ");
+        const shown = [...document.querySelectorAll(".monaco-editor .view-line")].filter((l) => l.getClientRects().length);
+        const found = shown.filter((l) => norm(l.textContent || "").startsWith(String(start)));
+        if (found.length !== 1) return { why: `${found.length} lines`, lines: shown.map((l) => l.textContent) };
+        const walk = document.createTreeWalker(found[0], NodeFilter.SHOW_TEXT);
+        const r = document.createRange();
+        let at = 0;
+        for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+          const len = String(n.textContent).length;
+          if (Number(from) >= at && Number(from) < at + len) r.setStart(n, Number(from) - at);
+          if (Number(to) > at && Number(to) <= at + len) r.setEnd(n, Number(to) - at);
+          at += len;
+        }
+        const b = r.getBoundingClientRect();
+        const box = { x: b.left, y: b.top, width: b.width, height: b.height };
+        const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+        return b.width && hit && found[0].contains(hit) ? { box } : { why: "covered", box, hit: hit?.outerHTML.slice(0, 200) };
+      }, /** @type {[string, number, number]} */ ([start, from, to]));
+      if (v.box && !v.why && JSON.stringify(v.box) === last) return v.box;
+      last = JSON.stringify(v.box);
+      if (Date.now() > end) throw new Error(`no editor line starting "${start}" to right-click: ${JSON.stringify(v)}`);
+      await delay(100);
+    }
+  };
+  const menu = page.locator(".monaco-menu").first();
+  /** Right-click the middle of a page box; resolves with the menu's labels. @param {{x: number, y: number, width: number, height: number}} box */
+  const rightClick = async (box) => {
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { button: "right" });
+    await menu.locator(".action-label").first().waitFor({ timeout: 5000 });
+    await delay(250); // menu items take a mouse-up only 100 ms after they render
+    return menu.locator(".action-item .action-label").allInnerTexts();
+  };
+  const closeMenu = async () => {
+    await page.keyboard.press("Escape");
+    await page.locator(".monaco-menu").waitFor({ state: "detached", timeout: 5000 });
+  };
+  /** Click the entry; it must be there. @param {string[]} labels @param {string} what */
+  const choose = async (labels, what) => {
+    assert.ok(labels.some((l) => MENU_ENTRY.test(l)), `${what}: the entry in the menu ${JSON.stringify(labels)}`);
+    await menu.locator(".action-item .action-label", { hasText: MENU_ENTRY }).click();
+    await page.locator(".monaco-menu").waitFor({ state: "detached", timeout: 5000 });
+  };
+  /** The PDF back on page 1, unflashed, so the entry has to bring page 2. */
+  const reset = async () => {
+    await backend.goto(1, pdf, { dir });
+    await waitFor(() => panelFor(pdf)?.page === 1, "main.pdf on page 1");
+    await clearFlash();
+  };
+
+  // (e) a right-click on "appears" (cursor elsewhere): the cursor moves to it, the entry
+  //     flashes it on page 2
+  //     (no chat or side bar: room for the line beside the PDF)
+  await vscode.commands.executeCommand("workbench.action.closeAuxiliaryBar");
+  await vscode.commands.executeCommand("workbench.action.closeSidebar");
+  const ed = await vscode.window.showTextDocument(mainEd.document, { viewColumn: mainEd.viewColumn });
+  ed.selection = new vscode.Selection(line - 3, 0, line - 3, 0);
+  ed.revealRange(new vscode.Range(line, 0, line, 0), vscode.TextEditorRevealType.InCenter);
+  await reset();
+  const appears = text.indexOf("appears");
+  const labels = await rightClick(await editorRect(prefix, appears, appears + "appears".length));
+  await choose(labels, "(e)");
+  await waitFor(() => {
+    const e = vscode.window.activeTextEditor;
+    const c = e?.selection.active;
+    return e?.document.uri.fsPath === main && e.selection.isEmpty && c?.line === line && c.character >= appears && c.character <= appears + 7;
+  }, "(e) the right-click puts the cursor on the word", 5000);
+  onWord(await flashed(), await wordRect("appears", "appears"), "(e) the menu entry");
+  await waitFor(() => panelFor(pdf)?.page === 2, "(e) page 2 after the menu entry");
+
+  // (f) "appears twice" selected, a right-click on "twice": the selection stays, both flash
+  const from = text.indexOf("appears twice");
+  const to = from + "appears twice".length;
+  const sel = new vscode.Selection(line, from, line, to);
+  ed.selection = sel;
+  await reset();
+  await choose(await rightClick(await editorRect(prefix, to - "twice".length, to)), "(f)");
+  assert.ok(ed.selection.isEqual(sel), `(f) the selection stays: ${JSON.stringify(ed.selection)}`);
+  const bars = await flashed();
+  const words = [await wordRect("appears", "appears"), await wordRect("twice", "twice")];
+  for (const w of words) {
+    assert.ok(w, "(f) the word in the text layer");
+    assert.ok(bars.some((b) => b.x < w.x + 3 && b.x + b.width > w.x + w.width - 3 && Math.abs(b.y + b.height / 2 - (w.y + w.height / 2)) < w.height),
+      `(f) a bar ${JSON.stringify(bars)} on ${JSON.stringify(w)}`);
+  }
+  const width = words.reduce((s, w) => s + (w?.width || 0), 0);
+  assert.ok(bars.reduce((s, b) => s + b.width, 0) < 1.5 * width, `(f) the two words, not the line: ${JSON.stringify(bars)}`);
+  await waitFor(() => panelFor(pdf)?.page === 2, "(f) page 2 after the menu entry");
+
+  // (g) a Markdown file: the menu (with Copy) but not the entry
+  const notes = path.join(workspace, "notes.md");
+  fs.writeFileSync(notes, "Plain notes, not TeX at all.\n");
+  await vscode.window.showTextDocument(vscode.Uri.file(notes), { viewColumn: mainEd.viewColumn });
+  const other = await rightClick(await editorRect("Plain notes", 6, 11));
+  assert.ok(other.some((l) => /^Copy\b/.test(l)), `(g) the menu ${JSON.stringify(other)}`);
+  assert.ok(!other.some((l) => MENU_ENTRY.test(l)), `(g) no entry in a .md editor's menu ${JSON.stringify(other)}`);
+  await closeMenu();
+  await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+  fs.rmSync(notes);
 }
 
 /** The middle of a rect, as [x, y]. @param {number[]} r @returns {[number, number]} */
