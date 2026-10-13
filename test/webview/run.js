@@ -18,7 +18,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawn, execFileSync } = require("node:child_process");
 const { chromium } = require("playwright-core");
-const { samplePdf, threadPdf } = require("../helpers/pdf");
+const { makePdf, samplePdf, sampleLines, threadPdf } = require("../helpers/pdf");
 
 const root = path.resolve(__dirname, "../..");
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "vpdf-webview-"));
@@ -671,12 +671,14 @@ test("SyncTeX: Ctrl+hover shows a grey underline and a file:line tip from the ex
   await page.mouse.move(at.x + 4, at.y);
   const req = /** @type {any} */ (await posted(page, { type: "synctexHover" }, mark));
   assert.equal(req.page, 1);
+  // with the word under the pointer and its context, for the extension to find in the source
+  assert.deepEqual(req.anchor, { before: ["page", "1", "heading"], words: ["reachability"], after: ["of", "timed", "automata", "is", "decidable", "via"] });
   // SyncTeX space: big points from the page's top-left; the line's baseline is 100 bp down
   const { scale } = await pageBox(page);
   assert.ok(Math.abs(req.y - 97) < 6, `y ${req.y}`);
   assert.ok(Math.abs(req.x - (72 + 44 / scale)) < 3, `x ${req.x}`);
-  await answerHover(page, { file: "/proj/main.tex", rel: "main.tex", line: 12, column: null,
-    text: "Reachability of timed automata is decidable via regions.", rects: [lineRect(2)] });
+  await answerHover(page, { file: "/proj/main.tex", rel: "main.tex", line: 12, column: 0,
+    text: "Reachability of timed automata is decidable via regions.", em: [0, 12], rects: [lineRect(2)] });
   const bar = page.locator(".synctexHover .bar");
   await bar.first().waitFor();
   assert.equal(await bar.count(), 1);
@@ -687,6 +689,7 @@ test("SyncTeX: Ctrl+hover shows a grey underline and a file:line tip from the ex
   await tip.waitFor();
   assert.equal(await tip.locator(".synctexWhere").textContent(), "main.tex:12");
   assert.equal(await tip.locator(".synctexLine").textContent(), "Reachability of timed automata is decidable via regions.");
+  assert.equal(await tip.locator(".synctexLine .synctexWord").textContent(), "Reachability", "the matched word stands out");
   assert.equal(await bar.first().evaluate((e) => getComputedStyle(e).pointerEvents), "none", "the underline lets the pointer through");
 
   // releasing Ctrl removes both; a late answer to an old request shows nothing
@@ -817,6 +820,8 @@ test("SyncTeX: Ctrl+click posts the inverse search, also on a link (which it doe
   await page.keyboard.up("Control");
   const edit = /** @type {any} */ (await posted(page, { type: "synctexEdit" }, mark));
   assert.equal(edit.page, 1);
+  // the clicked word and its context from the text layer
+  assert.deepEqual(edit.anchor, { before: ["filler", "line", "3", "on", "page", "1"], words: ["filler"], after: ["line", "4", "on", "page", "1", "filler"] });
   assert.ok(Math.abs(edit.y - (792 - (720 - 14 * 9)) + 3) < 6, `y ${edit.y}`);
   await page.waitForTimeout(100);
   assert.ok(await page.locator(".miniBar").isHidden(), "no mini-bar, no selection");
@@ -871,6 +876,85 @@ test("SyncTeX: a forward search scrolls to the place, flashes it, then the flash
   assert.ok(Math.abs(bb.y + bb.height / 2 - (span.y + span.height / 2)) < span.height, `flash ${JSON.stringify(bb)} on the line ${JSON.stringify(span)}`);
   assert.equal(await page.inputValue("#pageNumber"), "3");
   await bar.first().waitFor({ state: "detached", timeout: 4000 });
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+/**
+ * The client box of the `nth` occurrence of `word` in the text layer of `pageNo`.
+ * @param {import("playwright-core").Page} page @param {number} pageNo @param {string} text a span's text
+ * @param {string} word @param {number} [nth]
+ */
+const wordBox = (page, pageNo, text, word, nth = 0) => page.evaluate(([pageNo, text, word, nth]) => {
+  const span = [...document.querySelectorAll(`.page[data-page-number='${pageNo}'] .textLayer span`)]
+    .find((s) => s.textContent === text);
+  const node = span?.firstChild;
+  if (!node) return null;
+  let at = -1;
+  for (let i = 0; i <= Number(nth); i++) at = String(node.textContent).indexOf(String(word), at + 1);
+  const r = document.createRange();
+  r.setStart(node, at);
+  r.setEnd(node, at + String(word).length);
+  const b = r.getBoundingClientRect();
+  return { x: b.x, y: b.y, width: b.width, height: b.height };
+}, /** @type {[number, string, string, number]} */ ([pageNo, text, word, nth]));
+
+test("SyncTeX: a forward search with the word at the cursor flashes only that word (a repeated one by its context, a hyphenated one in two parts); no match flashes the line", async () => {
+  const pdf = path.join(tmp, "stx-word.pdf");
+  const repeated = "The model of the model checker is a model too.";
+  fs.writeFileSync(pdf, makePdf([["Page 1 heading", "", repeated, ...sampleLines(1).slice(2)], sampleLines(2)]));
+  const { page, errors } = await open(await serve(pdf));
+  await page.evaluate(() => /** @type {any} */ (window).__send({ type: "synctex", available: true }));
+  const bars = page.locator(".synctexFlash .bar");
+  const show = async (/** @type {any} */ msg) => {
+    await page.evaluate(() => document.querySelector(".synctexFlash")?.replaceChildren());
+    const mark = await count(page);
+    await page.evaluate((m) => /** @type {any} */ (window).__send({ type: "synctexShow", reqId: 5, ...m }), msg);
+    await posted(page, { type: "gotoDone", reqId: 5 }, mark);
+    await bars.first().waitFor();
+    return Promise.all((await bars.all()).map((b) => b.boundingBox()));
+  };
+  /** @param {any} a @param {any} b */
+  const near = (a, b, tol = 2) => a && b && Math.abs(a.x - b.x) < tol && Math.abs(a.width - b.width) < tol
+    && Math.abs(a.y + a.height / 2 - (b.y + b.height / 2)) < b.height / 2;
+
+  // the second "model" of the line: its context ("of the" before, "checker" after) picks it
+  let got = await show({ page: 1, rects: [lineRect(2)],
+    anchor: { before: ["heading", "the", "model", "of", "the"], words: ["model"], after: ["checker", "is", "a", "model", "too"] } });
+  let want = await wordBox(page, 1, repeated, "model", 1);
+  assert.equal(got.length, 1);
+  assert.ok(near(got[0], want), `flash ${JSON.stringify(got[0])} on the word ${JSON.stringify(want)}`);
+  // the third one, and two words the cursor spans
+  got = await show({ page: 1, rects: [lineRect(2)], anchor: { before: ["is", "a"], words: ["model"], after: ["too", "reachability"] } });
+  assert.ok(near(got[0], await wordBox(page, 1, repeated, "model", 2)), "the third model");
+  got = await show({ page: 1, rects: [lineRect(2)], anchor: { before: ["the", "model"], words: ["checker", "is"], after: ["a"] } });
+  want = await wordBox(page, 1, repeated, "checker is");
+  assert.ok(got.length === 1 && near(got[0], want), `flash ${JSON.stringify(got)} on "checker is" ${JSON.stringify(want)}`);
+
+  // a word TeX hyphenated across two printed lines: both parts
+  got = await show({ page: 1, rects: [lineRect(4), lineRect(5)], anchor: { before: ["this", "sentence", "is"], words: ["hyphenated"], after: ["across"] } });
+  assert.equal(got.length, 2, JSON.stringify(got));
+  assert.ok(near(got[0], await wordBox(page, 1, "This sentence is hyphen-", "hyphen-")), "first part");
+  assert.ok(near(got[1], await wordBox(page, 1, "ated across two lines.", "ated")), "second part");
+
+  // a word that is not there, two places alike, or no anchor: the line, as before
+  const line = await show({ page: 1, rects: [lineRect(2)] });
+  for (const anchor of [{ before: [], words: ["absent"], after: [] }, { before: [], words: ["model"], after: [] }]) {
+    got = await show({ page: 1, rects: [lineRect(2)], anchor });
+    assert.equal(got.length, 1);
+    assert.ok(near(got[0], line[0]) && /** @type {any} */ (got[0]).width > 300, `the line ${JSON.stringify(got[0])}`);
+  }
+
+  // a word printed on lines just after the line's boxes (a macro argument): found there
+  got = await show({ page: 1, rects: [lineRect(6)], near: [{ page: 1, rects: [lineRect(7), lineRect(8)] }],
+    anchor: { before: ["filler", "line", "2", "on"], words: ["page"], after: ["1", "filler"] } });
+  assert.ok(near(got[0], await wordBox(page, 1, "Filler line 2 on page 1.", "page")), `in the near lines: ${JSON.stringify(got)}`);
+
+  // on a page whose text layer is not rendered yet: it waits for it
+  got = await show({ page: 2, rects: [lineRect(33)], anchor: { before: ["filler", "line", "28", "on"], words: ["page"], after: ["2"] } });
+  assert.ok(near(got[0], await wordBox(page, 2, "Filler line 28 on page 2.", "page")), `page 2: ${JSON.stringify(got)}`);
+  assert.equal(await page.inputValue("#pageNumber"), "2");
+
   assert.deepEqual(errors, []);
   await page.close();
 });

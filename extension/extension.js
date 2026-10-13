@@ -5,7 +5,8 @@
  * directory, so the MCP server and the hook can see what the user is reading and the
  * server can `goto`. The user's marks are written through pdf-reader-writer-mcp's edit
  * service (`Marking` below). SyncTeX (Ctrl+hover, Ctrl+click, forward search, the
- * selection's source lines) is parsed in-process by synctexstore.js and lib/synctex.js.
+ * selection's source lines) is parsed in-process by synctexstore.js and lib/synctex.js;
+ * media/wordmatch.mjs takes both directions from the line to the word.
  * Everything vscode-free lives in state.js, ipc.js, html.js, editservice.js, marks.js,
  * synctexstore.js and lib/.
  */
@@ -16,10 +17,11 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
+const { pathToFileURL } = require("node:url");
 const { StateStore } = require("./state");
 const { EditService } = require("./editservice");
 const { MarkController } = require("./marks");
-const { SynctexStore, pdfCandidatesForTex, sourceLine } = require("./synctexstore");
+const { SynctexStore, pdfCandidatesForTex, sourceLine, sourceLines, snippet } = require("./synctexstore");
 const ipc = require("./ipc");
 const { renderHtml, nonce } = require("./html");
 const { stateDir } = require("../lib/runtime");
@@ -53,6 +55,19 @@ function withTimeout(promise, ms, what) {
       timer = setTimeout(() => reject(new Error(`${what} timed out after ${Math.round(ms / 1000)} s`)), ms);
     }),
   ]).finally(() => clearTimeout(timer));
+}
+
+/** @type {Promise<typeof import("../media/wordmatch.mjs")> | undefined} */
+let wordmatchModule;
+/** The word matcher the webview uses too (an ES module). */
+const wordmatch = () => (wordmatchModule ??= import(pathToFileURL(path.join(__dirname, "..", "media", "wordmatch.mjs")).href));
+
+/** The text of a source file as the editor has it if open (the cursor's columns), else from disk. @param {string} file */
+function textLines(file) {
+  const real = realPath(file);
+  const doc = vscode.workspace.textDocuments.find((d) => d.uri.scheme === "file" && !d.isClosed
+    && (d.uri.fsPath === file || realPath(d.uri.fsPath) === real));
+  return doc ? doc.getText().split(/\r?\n/) : sourceLines(file);
 }
 
 /** One open PDF tab. */
@@ -172,7 +187,7 @@ class PdfPanel {
         this.publishSelection();
         break;
       case "synctexHover":
-        this.owner.synctexHover(this, m);
+        void this.owner.synctexHover(this, m);
         break;
       case "synctexEdit":
         void this.owner.synctexEdit(this, m);
@@ -257,16 +272,18 @@ class PdfPanel {
 
   /**
    * Show `page` and flash `rects` (SyncTeX boxes, bp from the page's top-left) for a
-   * moment; returns the entry after the move.
+   * moment, or only the `anchor`'s words if the webview finds them there or in `near`;
+   * returns the entry after the move.
    * @param {number} page @param {number[][]} rects
+   * @param {{anchor?: any, near?: {page: number, rects: number[][]}[]}} [word]
    */
-  async flash(page, rects) {
+  async flash(page, rects, word = {}) {
     await withTimeout(this.loaded, OPEN_TIMEOUT_MS, `loading ${this.path}`);
     if (page < 1 || page > this.pages) throw new Error(`page ${page} outside 1-${this.pages}`);
     this.panel.reveal(this.panel.viewColumn, true);
     const reqId = ++this.reqSeq;
     const done = new Promise((resolve) => this.gotoWaiters.set(reqId, resolve));
-    await this.panel.webview.postMessage({ type: "synctexShow", page, rects, reqId });
+    await this.panel.webview.postMessage({ type: "synctexShow", page, rects, reqId, ...word });
     const shown = await withTimeout(done, 5000, "SyncTeX forward search");
     this.page = /** @type {number} */ (shown);
     this.owner.store.updatePanel(this.id, { page: this.page });
@@ -438,30 +455,56 @@ class Viewer {
 
   // ---- SyncTeX -------------------------------------------------------------------------
 
+  /**
+   * Where a Ctrl+click at `m` goes: SyncTeX's line, then the word under the pointer
+   * (`m.anchor`) looked up in the source around it, if found.
+   * @param {import("../lib/synctex").Synctex} data @param {any} m
+   */
+  async editTarget(data, m) {
+    const r = data.edit(m.page, m.x, m.y);
+    if (!r || !r.file) return null;
+    /** @type {{line: number, column: number, end: number} | null} */
+    let word = null;
+    if (m.anchor) {
+      try {
+        const lines = textLines(r.file);
+        word = (await wordmatch()).findInSource(lines, r.line, m.anchor);
+      } catch (e) {
+        trace(`SyncTeX word match: ${e instanceof Error ? e.message : e}`);
+      }
+    }
+    return { r, word };
+  }
+
   /** Ctrl+hover: what Ctrl+click would open, and the boxes to underline. @param {PdfPanel} panel @param {any} m */
-  synctexHover(panel, m) {
+  async synctexHover(panel, m) {
     const data = this.synctex.peek(panel.realPath);
     /** @type {any} */
     let hit = null;
     if (data && Number.isInteger(m.page) && Number.isFinite(m.x) && Number.isFinite(m.y)) {
-      const r = data.edit(m.page, m.x, m.y);
-      if (r && r.file) {
-        hit = { file: r.file, rel: vscode.workspace.asRelativePath(r.file, false), line: r.line, column: r.column,
-          text: sourceLine(r.file, r.line), rects: r.rects };
+      const t = await this.editTarget(data, m);
+      if (t) {
+        const { r, word } = t;
+        const line = word ? word.line : r.line;
+        const shown = word ? snippet(textLines(r.file)[line - 1] || "", [word.column, word.end]) : { text: sourceLine(r.file, line) };
+        hit = { file: r.file, rel: vscode.workspace.asRelativePath(r.file, false), line, column: word ? word.column : r.column,
+          ...shown, rects: r.rects };
       }
     }
     panel.post({ type: "synctexHit", reqId: m.reqId, hit });
   }
 
-  /** Ctrl+click: inverse search, open the source at the line. @param {PdfPanel} panel @param {any} m */
+  /** Ctrl+click: inverse search, open the source at the word (else the line). @param {PdfPanel} panel @param {any} m */
   async synctexEdit(panel, m) {
     if (!Number.isInteger(m.page) || !Number.isFinite(m.x) || !Number.isFinite(m.y)) return;
     const data = this.synctex.peek(panel.realPath) || await this.synctex.get(panel.realPath);
-    const r = data?.edit(m.page, m.x, m.y);
-    if (!r || !r.file) return;
-    trace(`SyncTeX: ${panel.path} page ${m.page} -> ${r.file}:${r.line}`);
+    const t = data && await this.editTarget(data, m);
+    if (!t) return;
+    const { r, word } = t;
+    const line = word ? word.line : r.line;
+    trace(`SyncTeX: ${panel.path} page ${m.page} -> ${r.file}:${r.line}${word ? `, word at ${word.line}:${word.column}` : ""}`);
     try {
-      await openSource(r.file, r.line, r.column, panel);
+      await openSource(r.file, line, word ? word.column : r.column, panel);
     } catch (e) {
       void vscode.window.showWarningMessage(`SyncTeX: cannot open ${r.file}: ${e instanceof Error ? e.message : e}`);
     }
@@ -488,24 +531,41 @@ class Viewer {
 
   /**
    * Forward search: show `line` of `tex` in its PDF (`pdf`, else found by `pdfForTex`),
-   * opening the PDF if needed, and flash its boxes. Returns the entry.
+   * opening the PDF if needed, and flash its boxes. With a `column` (0-based; to `end` for
+   * a selected stretch), or else a text editor whose cursor is on that line of that file
+   * (LaTeX Workshop passes no column), the webview flashes just the word there if it finds
+   * it. Returns the entry.
    * @param {unknown} tex @param {unknown} line @param {unknown} column @param {unknown} pdf
+   * @param {number} [end]
    */
-  async synctexForward(tex, line, column, pdf) {
+  async synctexForward(tex, line, column, pdf, end) {
     if (typeof tex !== "string" || !tex) throw new Error("tex must be the path of a source file");
     if (!Number.isInteger(line) || /** @type {number} */ (line) < 1) throw new Error(`line must be a positive integer, got ${line}`);
-    void column; // pdfTeX, XeTeX and LuaTeX record no columns
+    const ln = /** @type {number} */ (line);
     const source = path.resolve(tex);
     const target = typeof pdf === "string" && pdf ? path.resolve(pdf) : await this.pdfForTex(source);
     if (!fs.existsSync(target)) throw new Error(`no such file: ${target}`);
     const data = await this.synctex.get(realPath(target));
     if (!data) throw new Error(`no SyncTeX data for ${target} (no .synctex.gz or .synctex next to it; compile with -synctex=1)`);
     const open = this.pick(target);
-    const hit = data.view(source, /** @type {number} */ (line), { pageHint: open?.page || 0 });
+    const hit = data.view(source, ln, { pageHint: open?.page || 0 });
     if (!hit) throw new Error(`${source} is not in the SyncTeX data of ${target}`);
-    trace(`SyncTeX: ${source}:${line} -> ${target} page ${hit.page}`);
+    /** @type {{column: number, end?: number} | null} */
+    const at = Number.isInteger(column) && /** @type {number} */ (column) >= 0
+      ? { column: /** @type {number} */ (column), end } : cursorOn(source, ln);
+    /** @type {{anchor?: any, near?: {page: number, rects: number[][]}[]}} */
+    const word = {};
+    if (at) {
+      try {
+        const anchor = (await wordmatch()).sourceAnchor(textLines(source), ln, at.column, at.end);
+        if (anchor) Object.assign(word, { anchor, near: nearLines(data, source, ln, hit) });
+      } catch (e) {
+        trace(`SyncTeX word match: ${e instanceof Error ? e.message : e}`);
+      }
+    }
+    trace(`SyncTeX: ${source}:${ln}${at ? `:${at.column}` : ""} -> ${target} page ${hit.page}${word.anchor ? ` (${word.anchor.words.join(" ")})` : ""}`);
     const p = await this.open(target);
-    return p.flash(hit.page, hit.rects);
+    return p.flash(hit.page, hit.rects, word);
   }
 
   /** Socket handler. @param {any} req */
@@ -720,6 +780,42 @@ async function openSource(file, line, column, pdf) {
   return editor;
 }
 
+/**
+ * The cursor's column on `line` (1-based) of `file` in the active text editor, else in a
+ * visible one; with the selected stretch's end when the selection is on that line.
+ * @param {string} file @param {number} line @returns {{column: number, end?: number} | null}
+ */
+function cursorOn(file, line) {
+  const real = realPath(file);
+  const eds = [vscode.window.activeTextEditor, ...vscode.window.visibleTextEditors];
+  for (const ed of eds) {
+    if (!ed || ed.document.uri.scheme !== "file") continue;
+    if (ed.document.uri.fsPath !== file && realPath(ed.document.uri.fsPath) !== real) continue;
+    const sel = ed.selection;
+    if (sel.active.line !== line - 1) continue;
+    const oneLine = !sel.isEmpty && sel.start.line === sel.end.line;
+    return oneLine ? { column: sel.start.character, end: sel.end.character } : { column: sel.active.character };
+  }
+  return null;
+}
+
+/**
+ * Where else a forward search's word may be printed: the boxes of the next few source
+ * lines that have their own (a macro argument's text carries the line it ends on), on
+ * the page of `hit` or after it.
+ * @param {import("../lib/synctex").Synctex} data @param {string} file @param {number} line
+ * @param {{page: number}} hit
+ */
+function nearLines(data, file, line, hit) {
+  /** @type {{page: number, rects: number[][]}[]} */
+  const out = [];
+  for (let l = line + 1; l <= line + 5 && out.length < 3; l++) {
+    const v = data.view(file, l, { pageHint: hit.page });
+    if (v && v.line === l && v.page >= hit.page && v.page <= hit.page + 1) out.push({ page: v.page, rects: v.rects });
+  }
+  return out;
+}
+
 /** The view column of the most recently active text editor. @type {vscode.ViewColumn | undefined} */
 let lastTextColumn;
 
@@ -801,9 +897,12 @@ async function activate(context) {
         void vscode.window.showWarningMessage("SyncTeX: show in PDF needs a .tex file in the active editor");
         return undefined;
       }
-      const pos = ed.selection.active;
+      const sel = ed.selection;
+      const pos = sel.active;
+      const end = !sel.isEmpty && sel.start.line === sel.end.line ? sel.end.character : undefined;
       try {
-        return await viewer.synctexForward(ed.document.uri.fsPath, pos.line + 1, pos.character, undefined);
+        return await viewer.synctexForward(ed.document.uri.fsPath, pos.line + 1, end === undefined ? pos.character : sel.start.character,
+          undefined, end);
       } catch (e) {
         void vscode.window.showWarningMessage(`SyncTeX: ${e instanceof Error ? e.message : e}`);
         return undefined;

@@ -11,9 +11,9 @@ Three parts, one npm package:
    notes and reply threads, links, Ctrl+F). It publishes what you are reading and accepts
    `goto`, and you mark the PDF in it as in Okular: highlight, underline, squiggly,
    strikeout, margin notes and replies (see [Marking](#marking)). For LaTeX documents it
-   does SyncTeX: Ctrl+click jumps to the source line, forward search shows a source line
-   in the PDF (also from LaTeX Workshop), and a selection carries its source lines (see
-   [SyncTeX](#synctex)).
+   does SyncTeX, down to the word: Ctrl+click jumps to the word in the source, forward
+   search shows the word at the cursor in the PDF (also from LaTeX Workshop), and a
+   selection carries its source lines (see [SyncTeX](#synctex)).
 2. **An MCP stdio server**, `vscode-pdf-mcp` (server name `vscode-pdf`), with the tools
    `viewer_state`, `get_selection` and `goto`.
 3. **A Claude Code `UserPromptSubmit` hook**, `vscode-pdf-mcp-hook`, that adds one line of
@@ -275,24 +275,28 @@ writing it), and dropped when it disappears.
 - **Ctrl + hover.** Hold Ctrl over a page: the text that Ctrl+click would jump to (the
   stretch of the printed line under the pointer that comes from one source line) gets a
   grey underline, and a tip next to the pointer shows `<file>:<line>` (relative to the
-  workspace) and that source line's text. Ctrl can go down before or after the pointer
-  arrives, and while it is held both follow the pointer as it moves. Both go when you
-  release Ctrl or leave the page, and during a Ctrl+wheel (or pinch) zoom. They do not
-  catch the pointer, so selection, marks and popovers work as before. (Pointer moves do not
-  always report a held Ctrl, as seen under Wayland: the viewer also goes by the Ctrl key
-  itself, which it sees when its tab has the keyboard focus.)
-- **Ctrl + click** opens the source at that line (inverse search): in an editor that
-  already shows the file, else in a group that has it open, else in the group right of
-  the PDF's or the text group you used last, else in a new group beside the PDF; never in
-  the PDF tab's own group. Ctrl+click on a link does SyncTeX, not the link (a plain click
-  still follows links). Without SyncTeX data, Ctrl+click does nothing special.
+  workspace) and that source line's text, with the word under the pointer in bold when it
+  is found in the source (see [Down to the word](#down-to-the-word)). Ctrl can go down
+  before or after the pointer arrives, and while it is held both follow the pointer as it
+  moves. Both go when you release Ctrl or leave the page, and during a Ctrl+wheel (or
+  pinch) zoom. They do not catch the pointer, so selection, marks and popovers work as
+  before. (Pointer moves do not always report a held Ctrl, as seen under Wayland: the
+  viewer also goes by the Ctrl key itself, which it sees when its tab has the keyboard
+  focus.)
+- **Ctrl + click** opens the source with the cursor on the clicked word (inverse search),
+  or at the start of the line when the word cannot be placed: in an editor that already
+  shows the file, else in a group that has it open, else in the group right of the PDF's
+  or the text group you used last, else in a new group beside the PDF; never in the PDF
+  tab's own group. Ctrl+click on a link does SyncTeX, not the link (a plain click still
+  follows links). Without SyncTeX data, Ctrl+click does nothing special.
 - **Forward search** (source line to PDF): **SyncTeX: show in PDF**
   (`vscodePdfMcp.synctexForward`, in the command palette of a `.tex` editor; bind a key
-  to it if you like) takes the line at the cursor. The PDF is the open one whose SyncTeX
-  data has that file, else `<root>.pdf` of a `% !TEX root = <root>.tex` magic comment in
-  the file's first 20 lines, else the PDF of the same base name. The viewer opens it (or
-  reveals its tab, keeping the focus in your editor), scrolls there and flashes the text
-  in grey for a moment.
+  to it if you like) takes the line and the word at the cursor (or the words of a
+  selection within the line). The PDF is the open one whose SyncTeX data has that file,
+  else `<root>.pdf` of a `% !TEX root = <root>.tex` magic comment in the file's first 20
+  lines, else the PDF of the same base name. The viewer opens it (or reveals its tab,
+  keeping the focus in your editor), scrolls to the line and flashes that word in grey
+  for a moment, or the line's text when the word cannot be placed.
 - **Selections** on such a PDF carry their source lines: `get_selection` returns `tex`
   (CONTRACT C2) and the hook adds `Source:` lines (C7). Each line of the selection is
   mapped at its left and right ends.
@@ -310,6 +314,35 @@ put a source line's first word on its own line (where Ctrl+click can then differ
 `synctex edit`'s first result). Text inside a macro argument (a caption, a footnote) still
 maps to the argument's last line: TeX reads the whole argument before typesetting it.
 
+### Down to the word
+
+SyncTeX records source lines, not columns, so the viewer gets to the word by matching
+text, as TeXstudio does (`media/wordmatch.mjs`). Both sides become plain words: in the
+source, comments, control words and braces go (`\emph{x}` is `x`), the keys of `\cite`,
+`\ref`, `\label` and the like go with them, `~` is a space, quotes and dashes separate
+words; in the PDF, ligatures (fi, ffl, ...) are letters again and a word TeX hyphenated at
+a line end is one word; accents, case and punctuation around a word do not count. The
+word is looked for with about six words of context on each side:
+
+- **Ctrl+click**: on the source line SyncTeX names (preferred) and up to five lines above
+  and two below; found nowhere there, in the rest of a macro argument that ends on that
+  line (a caption or footnote: TeX gives all of it the argument's last line).
+- **Forward search**: among the words printed in the line's boxes (preferred), on the
+  same printed lines, and in the boxes of the next few source lines (again for a macro
+  argument: a caption's first line has no boxes of its own). The page's text layer must
+  be rendered first, which takes a moment on a page far away.
+
+A word that occurs more than once is told apart by its context. When two places are about
+as good, or the word is not found, it stays at the line: the cursor at the line's start,
+the flash on the whole line. The column of a forward search comes from the cursor (or
+the selection) for *SyncTeX: show in PDF*, from `--column` for `vscode-pdf-mcp-open`, and
+otherwise, as for LaTeX Workshop, which passes no column, from a text editor that shows
+the file with its cursor on that line (the active editor first); without one, it is the
+line. Limits: math (`$...$`, display math) is opaque, since the PDF prints symbols, and
+text that macros make up (`\citet`'s author names, `\Cref`'s "Section", running heads,
+`\newcommand` text) is not in the source; such a word stays at the line, or now and then
+lands on the same word nearby (LaTeX's "Figure" on a "figure" in the source).
+
 ### From other tools: `vscode-pdf-mcp-open`
 
 ```sh
@@ -321,8 +354,9 @@ It sends the request to the VS Code window that has the PDF open, else one whose
 workspace contains it, else the most recently focused window running the extension, and
 prints `<pdf>: page <n> of <pages>`. It exits 1 with the reason on stderr when no window
 can do it (none running, the file not in the PDF's SyncTeX data, ...) and 2 on bad
-arguments. `--column` is accepted for tools that pass one; TeX engines record no columns,
-so it does not change the result.
+arguments. `--column` (0-based; negative for none) picks the word to flash; without it, a
+text editor with its cursor on that line of the file gives the column (see
+[Down to the word](#down-to-the-word)).
 
 ### LaTeX Workshop
 
@@ -340,7 +374,8 @@ Then *View LaTeX PDF* opens this viewer and LaTeX Workshop's forward search
 (Ctrl+Alt+J) lands in it; inverse search is this viewer's Ctrl+click. LaTeX Workshop
 (checked with 10.19.0) fills `%PDF%` (the PDF's absolute path), `%TEX%` (the file in the
 active editor) and `%LINE%` (the cursor's line, 1-based) in the SyncTeX arguments; it has
-no column placeholder, hence no `--column`. Use the absolute path of
+no column placeholder, hence no `--column`: the viewer takes the column from that
+editor's cursor, which is on that line, so the flash is still the word at the cursor. Use the absolute path of
 `vscode-pdf-mcp-open` as the command if VS Code does not have it on its `PATH`. Builds
 need no setting: the viewer reloads the PDF when LaTeX Workshop rewrites it.
 
@@ -392,7 +427,7 @@ per connection (mode 0600):
 | `{"op":"state"}` | `{"ok":true,"state":{...}}` (as in the state file) |
 | `{"op":"goto","path":"/abs/paper.pdf" or null,"page":3}` | `{"ok":true,"entry":{...}}` or `{"ok":false,"error":"<message>"}` |
 | `{"op":"open","path":"/abs/paper.pdf"}` | the same: opens the PDF (beside the active editor, keeping the focus) or reveals its tab |
-| `{"op":"synctexForward","tex":"/abs/paper.tex","line":42,"column"?:0,"pdf"?:"/abs/paper.pdf"}` | the same, after the SyncTeX forward search: scrolled there and flashed; without `pdf` the window finds the PDF as *SyncTeX: show in PDF* does |
+| `{"op":"synctexForward","tex":"/abs/paper.tex","line":42,"column"?:0,"pdf"?:"/abs/paper.pdf"}` | the same, after the SyncTeX forward search: scrolled there and flashed (the word at the 0-based `column`, else at the cursor of an editor on that line, else the line); without `pdf` the window finds the PDF as *SyncTeX: show in PDF* does |
 
 For `goto`, the server resolves the path (default: the active entry's), checks that it
 exists and, when a tab has it open, the page range, and sends the request to the window that
@@ -408,14 +443,18 @@ Webview to extension messages: `ready`, `loaded {pages, page, reload}`,
 `loadError {message, reload}`, `page {page}`, `selection {selection}` (with `parts: [{page,
 rects}]`, the selection's rects in SyncTeX space, when the PDF has SyncTeX data),
 `gotoDone {reqId, page}`, `openLink {url}`, `openExternalViewer`, `error {message}`,
-for SyncTeX `synctexHover {reqId, page, x, y}` and `synctexEdit {page, x, y}`, and
+for SyncTeX `synctexHover {reqId, page, x, y, anchor?}` and `synctexEdit {page, x, y,
+anchor?}` (`anchor`: `{before, words, after}`, the normalised word under the pointer and
+up to six words of context each side, from the text layer), and
 for marking `mark {reqId, parts: [{page, rects, text}], style, color, note?}`,
 `note {reqId, page, point, note, color}`, `reply {reqId, xref, note}`,
 `update {reqId, xref, note?, color?, style?}`, `delete {reqId, xref}`, `undo {reqId}`,
 `prefs {style, color}`.
 Extension to webview: `load {data, reload}`, `goto {page, reqId}`, `visibility {visible}`,
-`synctex {available}`, `synctexHit {reqId, hit: {file, rel, line, column, text, rects} |
-null}`, `synctexShow {page, rects, reqId}` (answered with `gotoDone`),
+`synctex {available}`, `synctexHit {reqId, hit: {file, rel, line, column, text, em?, rects} |
+null}` (`em`: the matched word's `[start, end)` in `text`), `synctexShow {page, rects, reqId,
+anchor?, near?}` (answered with `gotoDone`; `anchor` the word at the cursor in the same form,
+`near: [{page, rects}]` the boxes of the next source lines to look in too),
 `marking {enabled, reason, author, keys, style?, color?}`, `annotations {list}` (the edit
 service's `list`, for the marked text), `editResult {reqId, op, ok, result | error}`.
 
@@ -424,7 +463,8 @@ SyncTeX positions and rects are in PDF big points from the page's top-left corne
 right, bottom]`. SyncTeX code: `lib/synctex.js` (parser and queries),
 `extension/synctexstore.js` (per-PDF data that follows its synctex file, the PDF of a
 `.tex`, source-line text), `media/synctex.mjs` (hover, Ctrl+click, flash, selection
-rects), `bin/open.js` (the CLI).
+rects, the text layer's words), `media/wordmatch.mjs` (normalising source and PDF text,
+matching an anchor; shared by the webview and the extension), `bin/open.js` (the CLI).
 
 Marking code: `extension/editservice.js` (the service client: spawn, framing, ids,
 restart), `extension/marks.js` (requests, per-document write queue and undo stack),
@@ -485,15 +525,20 @@ npm run test:integration      # a real VS Code under xvfb-run (skipped without x
   math, a list, two columns, two pages): reverse search on points over the text and on a
   grid over whole pages (same file and line, and the same result list), forward search on
   every source line (same page, overlapping boxes); skipped without `pdflatex` or
-  `synctex`. `vscode-pdf-mcp-open` runs against fake extension sockets.
+  `synctex`. The word matching (`media/wordmatch.mjs`) has unit tests for the
+  normalisation (macros, citations, math, quotes, dashes, ligatures, hyphenation) and the
+  matching (repeated words by context, no confident match, macro arguments), and an
+  inverse search from every word of the project's second page must land on that word.
+  `vscode-pdf-mcp-open` runs against fake extension sockets.
 - `npm run test:webview` serves the webview through `scripts/serve-webview.js` (the same
   HTML and CSP as in VS Code, with a mocked `acquireVsCodeApi`) and drives it with
   `playwright-core`: rendering, mouse selection, goto, reload in place, a half-written
   file, find, toolbar, and marking with a mocked extension: the mini-bar and the `mark`
   request with PDF-space rects, sticky tools, the margin-note click, keys, the popover
   thread and replies, edit/restyle/delete only on own marks, the side panel, and SyncTeX
-  with a mocked extension: the Ctrl+hover underline and tip, Ctrl+click (also on a link),
-  the forward-search flash, and Ctrl+wheel zoom with SyncTeX on. Set
+  with a mocked extension: the Ctrl+hover underline and tip, Ctrl+click (also on a link)
+  with the clicked word, the forward-search flash of a line and of a word (a repeated one,
+  a hyphenated one, one in the next lines' boxes), and Ctrl+wheel zoom with SyncTeX on. Set
   `CHROMIUM` to a Chromium or Chrome executable (otherwise Playwright's own download is
   used) and `VPDF_PYTHON` to a Python with `pymupdf` to also check PyMuPDF-written
   underlines and notes (`scripts/make-annotated-pdf.py`) and links.
@@ -505,8 +550,11 @@ npm run test:integration      # a real VS Code under xvfb-run (skipped without x
   opening a closed file and `cannot open`), replace-by-rename reloads of a background tab,
   the hook, and *Open in Okular* against a fake command; with `pdflatex`, a LaTeX project
   compiled into the workspace: Ctrl+click with the real mouse opens the `\input` file at
-  the line, *SyncTeX: show in PDF* and `vscode-pdf-mcp-open --tex` scroll the PDF, a
-  selection gives `tex` and `Source:`, and a rebuild refreshes the SyncTeX data. VS Code
+  the line, *SyncTeX: show in PDF* and `vscode-pdf-mcp-open --tex` scroll the PDF, both
+  down to the word (the flash on the word's text-layer box, the cursor on the clicked
+  word, the column from the editor's cursor when the request has none, a word of a
+  three-line caption both ways), a selection gives `tex` and `Source:`, and a rebuild
+  refreshes the SyncTeX data. VS Code
   runs with a remote-debugging port and the suite drives the webview with real mouse and
   keyboard input over CDP: it marks a selection, replies to an agent note, edits and
   deletes a mark and

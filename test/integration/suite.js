@@ -6,7 +6,8 @@
  * service, marking with real mouse and keyboard input over CDP: mark, reply, edit,
  * delete, undo, keys kept from VS Code, and concurrent writes with the MCP server.
  * With pdflatex, SyncTeX: Ctrl+click opens the source, forward search from the command
- * and from vscode-pdf-mcp-open, the selection's source lines, and a rebuild.
+ * and from vscode-pdf-mcp-open, both down to the word, the selection's source lines, and
+ * a rebuild.
  */
 "use strict";
 
@@ -580,6 +581,9 @@ async function synctex(ext) {
     assert.equal(out.code, 1);
     assert.match(out.stderr, /is not in the SyncTeX data of/);
 
+    // 4b. Word level, both ways (the page-2 line that repeats "model", the three-line caption).
+    if (f && page) await wordLevel({ f, page, main, pdf, mainEd });
+
     // 5. A selection: its source lines in the state file (C2 tex) and the hook (C7 Source).
     if (f && page) {
       const first = f.locator(".page[data-page-number='1'] .textLayer span").filter({ hasText: "This text comes" }).first();
@@ -627,6 +631,113 @@ async function synctex(ext) {
   } finally {
     await browser.close().catch(() => {});
   }
+}
+
+/**
+ * Word-level SyncTeX in the real viewer: (a) the command from a cursor on a word flashes
+ * that word; (b) Ctrl+click on a word puts the cursor on it; (c) a request without a
+ * column (as from LaTeX Workshop) takes the cursor's column; (d) a caption's word, whose
+ * text SyncTeX gives the argument's last line, both ways.
+ * @param {{f: import("playwright-core").Frame, page: import("playwright-core").Page, main: string, pdf: string,
+ *   mainEd: vscode.TextEditor}} ctx
+ */
+async function wordLevel({ f, page, main, pdf, mainEd }) {
+  const lines = fs.readFileSync(main, "utf8").split("\n");
+  const repeated = lines.findIndex((l) => l.startsWith("The word model appears twice")) + 1;
+  const caption = lines.findIndex((l) => l.startsWith("\\caption{")) + 1;
+  assert.ok(repeated > 0 && caption > 0);
+  /**
+   * The frame-client box of the `nth` `word` in the text-layer span of page 2 that contains `text`.
+   * @param {string} text @param {string} word @param {number} [nth]
+   */
+  const wordRect = (text, word, nth = 0) => f.evaluate(([text, word, nth]) => {
+    const span = [...document.querySelectorAll(".page[data-page-number='2'] .textLayer span")]
+      .find((e) => (e.textContent || "").includes(String(text)));
+    const node = span?.firstChild;
+    if (!node) return null;
+    let at = -1;
+    for (let i = 0; i <= Number(nth); i++) at = String(node.textContent).indexOf(String(word), at + 1);
+    if (at < 0) return null;
+    const r = document.createRange();
+    r.setStart(node, at);
+    r.setEnd(node, at + String(word).length);
+    const b = r.getBoundingClientRect();
+    return { x: b.left, y: b.top, width: b.width, height: b.height };
+  }, /** @type {[string, string, number]} */ ([text, word, nth]));
+  const clearFlash = () => f.evaluate(() => document.querySelector(".synctexFlash")?.replaceChildren());
+  /** The flash's bars (frame-client boxes), once there. */
+  const flashed = async () => {
+    const h = await f.waitForFunction(() => {
+      const bars = [...document.querySelectorAll(".synctexFlash .bar")];
+      return bars.length ? bars.map((b) => {
+        const r = b.getBoundingClientRect();
+        return { x: r.left, y: r.top, width: r.width, height: r.height };
+      }) : null;
+    }, null, { timeout: 5000 });
+    return /** @type {{x: number, y: number, width: number, height: number}[]} */ (await h.jsonValue());
+  };
+  /** @param {any} bars @param {any} word @param {string} what */
+  const onWord = (bars, word, what) => {
+    assert.ok(word, `${what}: the word in the text layer`);
+    assert.equal(bars.length, 1, `${what}: one bar ${JSON.stringify(bars)}`);
+    const [b] = bars;
+    assert.ok(Math.abs(b.x - word.x) < 3 && Math.abs(b.width - word.width) < 3 && Math.abs(b.y + b.height / 2 - (word.y + word.height / 2)) < word.height,
+      `${what}: flash ${JSON.stringify(b)} on the word ${JSON.stringify(word)}`);
+  };
+  /** Ctrl+click the middle of a frame-client box. @param {any} box */
+  const ctrlClick = async (box) => {
+    const div = f.locator(".page[data-page-number='2']");
+    const outer = await div.boundingBox();
+    const inner = await div.evaluate((el) => el.getBoundingClientRect().toJSON());
+    assert.ok(outer && box);
+    const x = box.x + box.width / 2 + outer.x - inner.left;
+    const y = box.y + box.height / 2 + outer.y - inner.top;
+    await page.keyboard.down("Control");
+    await page.mouse.click(x, y);
+    await page.keyboard.up("Control");
+  };
+  /** The editor of `main` once its cursor is at `line` (1-based), `column`. @param {number} line @param {number} column @param {string} what */
+  const cursorAt = (line, column, what) => waitFor(() => {
+    const e = vscode.window.activeTextEditor;
+    return e && e.document.uri.fsPath === main && e.selection.active.line === line - 1 && e.selection.active.character === column ? e : null;
+  }, what, 5000);
+
+  // (a) the command from the cursor on the second "model" (`a model of the`): that word
+  const second = lines[repeated - 1].indexOf("model of the");
+  const ed0 = await vscode.window.showTextDocument(mainEd.document, { viewColumn: mainEd.viewColumn });
+  ed0.selection = new vscode.Selection(repeated - 1, second + 2, repeated - 1, second + 2);
+  await clearFlash();
+  const e1 = /** @type {any} */ (await vscode.commands.executeCommand("vscodePdfMcp.synctexForward"));
+  assert.equal(e1?.page, 2);
+  onWord(await flashed(), await wordRect("model of the model", "model", 0), "(a) the command");
+
+  // (b) Ctrl+click on the third "model" (`model checker`): the cursor on it
+  await ctrlClick(await wordRect("model of the model", "model", 1));
+  const third = lines[repeated - 1].indexOf("model checker");
+  await cursorAt(repeated, third, "(b) Ctrl+click puts the cursor on the word");
+
+  // (c) no column (LaTeX Workshop): the cursor of the editor on that line gives it; now on
+  //     the third "model" after (b)
+  await clearFlash();
+  const e2 = await backend.synctexForward({ tex: main, line: repeated, pdf }, { dir });
+  assert.equal(e2.page, 2);
+  onWord(await flashed(), await wordRect("model of the model", "model", 1), "(c) the cursor's column");
+  //     and on another line of the file (no cursor there): the line, not a word
+  await clearFlash();
+  await backend.synctexForward({ tex: main, line: repeated - 1, pdf }, { dir });
+  const bars = await flashed();
+  assert.ok(bars.reduce((w, b) => w + b.width, 0) > 150, `(c) the line: ${JSON.stringify(bars)}`);
+
+  // (d) the caption: Ctrl+click on "zeppelin" (SyncTeX: the argument's last line) goes to
+  //     its own line and column; forward search from "several" flashes that word
+  await ctrlClick(await wordRect("zeppelin", "zeppelin"));
+  await cursorAt(caption + 1, lines[caption].indexOf("zeppelin"), "(d) Ctrl+click on a caption's word");
+  const ed = /** @type {vscode.TextEditor} */ (vscode.window.activeTextEditor);
+  const several = lines[caption - 1].indexOf("several");
+  ed.selection = new vscode.Selection(caption - 1, several + 1, caption - 1, several + 1);
+  await clearFlash();
+  await vscode.commands.executeCommand("vscodePdfMcp.synctexForward");
+  onWord(await flashed(), await wordRect("spans several", "several"), "(d) forward search from a caption's first line");
 }
 
 /** The middle of a rect, as [x, y]. @param {number[]} r @returns {[number, number]} */

@@ -360,3 +360,43 @@ test("selection: a selection of the first words of a source line does not pull i
   const src = data.sourceOfSelection([{ page: v.page, rects: [[l + 1, t + 1, right, b - 1]] }]);
   assert.deepEqual(src, [{ file: project.main, lines: [8, 8] }]);
 });
+
+// ---- word level (media/wordmatch.mjs) -----------------------------------------------------
+
+test("word level: an inverse search from each word of page 2 lands on that word in the source, also a repeated one and one in a caption", { skip: SKIP_WORDS }, async () => {
+  const { pdfTokens, anchorOf, findInSource, texTokens } = await import("../media/wordmatch.mjs");
+  const lines = fs.readFileSync(project.main, "utf8").split("\n");
+  const words = wordBoxes(project.pdf).filter((w) => w.page === 2);
+  // the page's text as the text layer has it: words in reading order, printed lines on lines
+  let text = "";
+  const at = words.map((w, i) => {
+    if (i) text += Math.abs(w.box[1] - words[i - 1].box[1]) > 2 ? "\n" : " ";
+    const start = text.length;
+    text += w.word;
+    return start;
+  });
+  const toks = pdfTokens(text);
+  let checked = 0;
+  /** @type {Map<string, {line: number, column: number}>} */
+  const got = new Map();
+  words.forEach((w, i) => {
+    const ti = toks.findIndex((t) => t.start <= at[i] && at[i] < t.end);
+    if (ti < 0 || !/^[A-Za-z]+[.,:]?$/.test(w.word)) return;
+    const [x0, y0, x1, y1] = w.box;
+    const hit = data.edit(2, (x0 + x1) / 2, y0 + 0.7 * (y1 - y0));
+    assert.ok(hit && hit.file === project.main, `edit on "${w.word}"`);
+    const r = findInSource(lines, hit.line, anchorOf(toks, ti));
+    if (w.word === "Figure") return; // LaTeX's own word: may match "figure" nearby, or nothing
+    assert.ok(r, `"${w.word}" (SyncTeX line ${hit.line}) found in the source`);
+    const there = texTokens(lines[r.line - 1]).find((t) => t.start === r.column);
+    assert.equal(there?.norm, toks[ti].norm, `"${w.word}" -> ${r.line}:${r.column}`);
+    got.set(`${w.word}#${[...got.keys()].filter((k) => k.startsWith(`${w.word}#`)).length}`, r);
+    checked++;
+  });
+  assert.ok(checked > 50, `checked ${checked} words`);
+  const l36 = lines[35];
+  assert.deepEqual(got.get("model#2"), { line: 36, column: l36.indexOf("model checker"), end: l36.indexOf("model checker") + 5 });
+  assert.equal(got.get("zeppelin#0")?.line, 41, "caption text carries line 42 in SyncTeX");
+  assert.equal(got.get("several#0")?.line, 40);
+  assert.equal(got.get("efficient#0")?.column, l36.indexOf("efficient"));
+});

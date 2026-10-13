@@ -182,12 +182,10 @@ function pdfCandidatesForTex(tex) {
 const lineCache = new Map();
 
 /**
- * Line `line` (1-based) of a text file, whitespace-collapsed and cut at `max` characters
- * with "…"; "" when unreadable. Cached by mtime and size.
- * @param {string} file @param {number} line @param {number} [max]
+ * The lines of a text file, [] when unreadable. Cached by mtime and size.
+ * @param {string} file @returns {string[]}
  */
-function sourceLine(file, line, max = 80) {
-  let text = "";
+function sourceLines(file) {
   try {
     const st = fs.statSync(file);
     let c = lineCache.get(file);
@@ -196,11 +194,56 @@ function sourceLine(file, line, max = 80) {
       lineCache.set(file, c);
       if (lineCache.size > 50) lineCache.delete(/** @type {string} */ (lineCache.keys().next().value));
     }
-    text = (c.lines[line - 1] || "").replace(/\s+/g, " ").trim();
+    return c.lines;
   } catch {
-    return "";
+    return [];
   }
-  return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
 }
 
-module.exports = { SynctexStore, pdfCandidatesForTex, sourceLine };
+/**
+ * Line `line` (1-based) of a text file, whitespace-collapsed and cut at `max` characters
+ * with "…"; "" when unreadable.
+ * @param {string} file @param {number} line @param {number} [max]
+ */
+function sourceLine(file, line, max = 80) {
+  return snippet(sourceLines(file)[line - 1] || "", null, max).text;
+}
+
+/**
+ * A source line for the tip: whitespace collapsed, at most about `max` characters, cut
+ * with "…" around the stretch [start, end) of the raw line when one is given (so that it
+ * shows), else at the end; `em` is that stretch in the result.
+ * @param {string} raw @param {[number, number] | null} stretch @param {number} [max]
+ * @returns {{text: string, em?: [number, number]}}
+ */
+function snippet(raw, stretch, max = 80) {
+  let text = "";
+  /** @type {number[]} position in `text` of each raw offset */
+  const at = [];
+  for (let i = 0; i < raw.length; i++) {
+    at.push(text.length);
+    if (/\s/.test(raw[i])) {
+      if (text && !text.endsWith(" ")) text += " ";
+    } else {
+      text += raw[i];
+    }
+  }
+  at.push(text.length);
+  const lead = text.length - text.trimStart().length;
+  text = text.trimEnd();
+  let em = stretch && stretch[1] > stretch[0] && stretch[1] <= raw.length
+    ? /** @type {[number, number]} */ ([at[stretch[0]] - lead, Math.min(at[stretch[1]], text.length) - lead]) : null;
+  text = text.slice(lead);
+  if (em && em[1] <= em[0]) em = null;
+  if (text.length <= max) return em ? { text, em } : { text };
+  if (!em || em[1] <= max - 1) return { text: `${text.slice(0, max - 1).trimEnd()}…`, ...(em ? { em } : {}) };
+  // the word is further in: a window around it, a third of the room before it
+  const from = Math.max(0, Math.min(em[0] - Math.floor((max - (em[1] - em[0])) / 3), text.length - (max - 1)));
+  const to = Math.min(text.length, from + max - 2);
+  const head = from > 0 ? "…" : "";
+  const tail = to < text.length ? "…" : "";
+  const body = text.slice(from, to);
+  return { text: head + body + tail, em: [em[0] - from + head.length, Math.min(em[1], to) - from + head.length] };
+}
+
+module.exports = { SynctexStore, pdfCandidatesForTex, sourceLine, sourceLines, snippet };

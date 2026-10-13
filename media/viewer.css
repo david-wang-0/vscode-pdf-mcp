@@ -259,4 +259,5 @@ body.finding #annotPanel { top: 64px; }
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.synctexTip .synctexWord { font-weight: 700; text-decoration: underline; }
 body.synctex-hover .page, body.synctex-hover .textLayer, body.synctex-hover .textLayer span { cursor: pointer; }

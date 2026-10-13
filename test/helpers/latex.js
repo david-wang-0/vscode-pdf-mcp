@@ -2,7 +2,8 @@
 /**
  * A small multi-file LaTeX project for the SyncTeX tests, compiled with
  * `pdflatex -synctex=1`: an `\input` file, a wrapped paragraph, display math (equation
- * and align), a list, two-column text (multicol) and a second page.
+ * and align), a list, two-column text (multicol) and a second page with a line that
+ * repeats a word and a figure whose caption spans three source lines.
  */
 "use strict";
 
@@ -55,6 +56,14 @@ function projectFiles(extraChapterLines = "") {
       "\\section{Second page}",
       "Text on the second page, written on one source line.",
       "Another sentence on the next source line of the second page.",
+      "The word model appears twice: a model of the model checker, with \\emph{efficient} offline~fluffy text.",
+      "\\begin{figure}[h]",
+      "\\centering",
+      "\\fbox{A boxed figure body}",
+      "\\caption{A caption that spans several source lines,",
+      "  with a distinctive word zeppelin in the middle",
+      "  and its last words here.}",
+      "\\end{figure}",
       "\\end{document}",
       "",
     ].join("\n"),

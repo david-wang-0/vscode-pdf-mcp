@@ -7,9 +7,10 @@
  *   vscode-pdf-mcp-open <pdf>
  *   vscode-pdf-mcp-open --tex <file> --line <n> [--column <n>] <pdf>
  *
- * The request goes to the VS Code window that has the PDF open, else one whose workspace
- * contains it, else the most recently focused window (README "SyncTeX"). Exit 0 on
- * success, 1 when no window does it (with the reason on stderr), 2 on bad arguments.
+ * `--column` (0-based) picks the word to flash. The request goes to the VS Code window
+ * that has the PDF open, else one whose workspace contains it, else the most recently
+ * focused window (README "SyncTeX"). Exit 0 on success, 1 when no window does it (with
+ * the reason on stderr), 2 on bad arguments.
  */
 "use strict";
 

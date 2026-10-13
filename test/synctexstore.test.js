@@ -12,7 +12,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const zlib = require("node:zlib");
-const { SynctexStore, pdfCandidatesForTex, sourceLine } = require("../extension/synctexstore");
+const { SynctexStore, pdfCandidatesForTex, sourceLine, sourceLines, snippet } = require("../extension/synctexstore");
 
 /** @type {(() => void)[]} */
 const cleanups = [];
@@ -137,4 +137,26 @@ test("sourceLine: the line, whitespace collapsed, cut at about 80 characters; em
   assert.equal(sourceLine(path.join(d, "nope.tex"), 1), "");
   fs.writeFileSync(f, "changed\n");
   assert.equal(sourceLine(f, 1), "changed", "re-read when the file changes");
+});
+
+test("snippet: the hover tip's line with the matched word marked, cut around it when the line is long", () => {
+  const raw = "  A  \\emph{model}\tof the model checker.";
+  const s = snippet(raw, [raw.indexOf("model checker"), raw.indexOf("model checker") + 5]);
+  assert.equal(s.text, "A \\emph{model} of the model checker.");
+  assert.equal(s.text.slice(...(/** @type {[number, number]} */ (s.em))), "model");
+  assert.equal(s.em?.[0], s.text.indexOf("model checker"));
+  assert.deepEqual(snippet(raw, null), { text: "A \\emph{model} of the model checker." });
+  // a long line: the word far in shows, with "…" on both sides and at most about 80 characters
+  const long = `${"a".repeat(100)} target ${"b".repeat(100)}`;
+  const l = snippet(long, [101, 107]);
+  assert.ok(l.text.startsWith("…") && l.text.endsWith("…") && l.text.length <= 80, l.text);
+  assert.equal(l.text.slice(...(/** @type {[number, number]} */ (l.em))), "target");
+  // near the start: cut at the end as sourceLine does
+  const e = snippet(`word ${"c".repeat(100)}`, [0, 4]);
+  assert.deepEqual([e.text.length, e.em], [80, [0, 4]]);
+  const d = tmp();
+  const f = path.join(d, "a.tex");
+  fs.writeFileSync(f, "one\r\ntwo\n");
+  assert.deepEqual(sourceLines(f), ["one", "two", ""]);
+  assert.deepEqual(sourceLines(path.join(d, "nope.tex")), []);
 });

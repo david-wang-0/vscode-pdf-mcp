@@ -9,11 +9,19 @@
  * Coordinates sent and received are SyncTeX's: PDF big points from the page's top-left
  * corner, y downwards. Rects are [left, top, right, bottom].
  *
- * Messages to the extension: synctexHover {reqId, page, x, y}, synctexEdit {page, x, y}.
- * Messages from it: synctex {available}, synctexHit {reqId, hit: {file, rel, line,
- * column, text, rects} | null}. (synctexShow {reqId, page, rects} is handled by viewer.js,
- * which calls `flash`.)
+ * Word level (wordmatch.mjs): SyncTeX records lines only, so a Ctrl+click or hover also
+ * sends the word under the pointer with a few words of context (`anchor`), which the
+ * extension looks for in the source; a forward search may bring the word at the cursor,
+ * which `flash` looks for in the text layer on and around the line's boxes and flashes
+ * alone. Without a confident match both stay at the line.
+ *
+ * Messages to the extension: synctexHover {reqId, page, x, y, anchor?}, synctexEdit
+ * {page, x, y, anchor?}. Messages from it: synctex {available}, synctexHit {reqId, hit:
+ * {file, rel, line, column, text, em?, rects} | null}. (synctexShow {reqId, page, rects,
+ * anchor?, near?} is handled by viewer.js, which calls `flash`.)
  */
+
+import { pdfTokens, anchorOf, findAnchor, validAnchor } from "./wordmatch.mjs";
 
 /** After a scroll, how long the view must rest before a lookup (ms). */
 const HOVER_DEBOUNCE_MS = 40;
@@ -23,6 +31,8 @@ const HOVER_FOLLOW_MS = 25;
 const WHEEL_QUIET_MS = 300;
 /** How long a forward search's flash stays (ms). */
 const FLASH_MS = 1500;
+/** How long a forward search with a word waits for the page's text layer (ms). */
+const TEXT_LAYER_WAIT_MS = 2000;
 
 /**
  * PDF user space point to SyncTeX space (origin top-left of the page's view box).
@@ -124,6 +134,140 @@ export function setupSynctex({ pdfViewer, eventBus, container, post }) {
     });
   }
 
+  /** Client rects to SyncTeX rects on a page. @param {Iterable<DOMRect>} crs @param {NonNullable<ReturnType<typeof pageGeom>>} g */
+  function synctexRects(crs, g) {
+    const q = (/** @type {number} */ v) => Math.round(v * 100) / 100;
+    /** @type {number[][]} */
+    const out = [];
+    for (const cr of crs) {
+      if (cr.width < 0.5 || cr.height < 0.5) continue;
+      const a = pdfToSynctex(g.viewport.convertToPdfPoint(cr.left - g.origin.left, cr.top - g.origin.top), g.viewport.viewBox);
+      const b = pdfToSynctex(g.viewport.convertToPdfPoint(cr.right - g.origin.left, cr.bottom - g.origin.top), g.viewport.viewBox);
+      out.push([q(Math.min(a[0], b[0])), q(Math.min(a[1], b[1])), q(Math.max(a[0], b[0])), q(Math.max(a[1], b[1]))]);
+    }
+    return out;
+  }
+
+  // ---- words of the text layer (wordmatch.mjs) -------------------------------------------
+  /**
+   * @typedef {{text: string, nodes: Text[], starts: number[], tokens: import("./wordmatch.mjs").Token[]}} PageWords
+   *   the text layer's text (a <br> is "\n"), its text nodes with their offsets, its words
+   */
+  /** @type {WeakMap<Element, PageWords>} by text layer div, dropped when it renders again */
+  const wordsCache = new WeakMap();
+
+  /** The page's text layer div once pdf.js has rendered it, else null. @param {number} page */
+  function textLayerOf(page) {
+    const div = pdfViewer.getPageView(page - 1)?.textLayer?.div;
+    return div && div.querySelector(".endOfContent") ? div : null;
+  }
+
+  /** @param {number} page @returns {PageWords | null} */
+  function pageWords(page) {
+    const div = textLayerOf(page);
+    if (!div) return null;
+    let w = wordsCache.get(div);
+    if (w) return w;
+    let text = "";
+    /** @type {Text[]} */
+    const nodes = [];
+    /** @type {number[]} */
+    const starts = [];
+    const walker = document.createTreeWalker(div, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      if (n.nodeType === Node.ELEMENT_NODE) {
+        if (n.nodeName === "BR") text += "\n";
+        continue;
+      }
+      nodes.push(/** @type {Text} */ (n));
+      starts.push(text.length);
+      text += /** @type {Text} */ (n).data;
+    }
+    w = { text, nodes, starts, tokens: pdfTokens(text) };
+    wordsCache.set(div, w);
+    return w;
+  }
+
+  /** The text node and offset of a text offset. @param {PageWords} w @param {number} off @returns {[Text, number]} */
+  function nodeAt(w, off) {
+    let lo = 0;
+    for (let hi = w.starts.length - 1; lo < hi;) {
+      const mid = (lo + hi + 1) >> 1;
+      if (w.starts[mid] <= off) lo = mid;
+      else hi = mid - 1;
+    }
+    return [w.nodes[lo], Math.min(off - w.starts[lo], w.nodes[lo].length)];
+  }
+
+  /** Client rects of words [index, index + count). @param {PageWords} w @param {number} index @param {number} count */
+  function wordClientRects(w, index, count) {
+    const r = document.createRange();
+    const [a, ao] = nodeAt(w, w.tokens[index].start);
+    const [b, bo] = nodeAt(w, w.tokens[index + count - 1].end - 1);
+    r.setStart(a, ao);
+    r.setEnd(b, Math.min(bo + 1, b.length));
+    return [...r.getClientRects()].filter((cr) => cr.width >= 0.5 && cr.height >= 0.5);
+  }
+
+  /**
+   * The anchor of the word under a client point on `page` (its words and context), or
+   * null when the point is not on a word of the text layer.
+   * @param {number} page @param {number} x @param {number} y
+   * @returns {import("./wordmatch.mjs").Anchor | null}
+   */
+  function anchorAt(page, x, y) {
+    const w = pageWords(page);
+    if (!w || !w.tokens.length) return null;
+    const slack = 1;
+    const inside = (/** @type {DOMRect} */ r) => x >= r.left - slack && x <= r.right + slack && y >= r.top - slack && y <= r.bottom + slack;
+    for (let k = 0; k < w.nodes.length; k++) {
+      const span = w.nodes[k].parentElement;
+      if (!span || !inside(span.getBoundingClientRect())) continue;
+      const from = w.starts[k];
+      const to = from + w.nodes[k].length;
+      for (let i = 0; i < w.tokens.length; i++) {
+        const t = w.tokens[i];
+        if (t.end <= from || t.start >= to) continue;
+        if (wordClientRects(w, i, 1).some(inside)) {
+          const a = anchorOf(w.tokens, i, 1);
+          return validAnchor(a) ? a : null;
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Where a forward search's anchor is on `page`: among the words in the line's `rects`
+   * (best), on the same printed lines, or in the `near` rects (lines just after it that
+   * may hold a macro argument's text); the words' SyncTeX rects, or null.
+   * @param {number} page @param {number[][]} rects @param {import("./wordmatch.mjs").Anchor} anchor
+   * @param {number[][]} near
+   */
+  function findWords(page, rects, anchor, near) {
+    const w = pageWords(page);
+    const g = pageGeom(page);
+    if (!w || !g) return null;
+    const pad = 1.5;
+    const inRect = (/** @type {number} */ x, /** @type {number} */ y, /** @type {number[]} */ r) =>
+      x >= r[0] - pad && x <= r[2] + pad && y >= r[1] - pad && y <= r[3] + pad;
+    /** @type {Map<number, number[][]>} */
+    const seen = new Map();
+    const hit = findAnchor(w.tokens, anchor, (i, count) => {
+      const rs = synctexRects(wordClientRects(w, i, count), g);
+      seen.set(i, rs);
+      if (!rs.length) return null;
+      const [l, t, r, b] = rs[0];
+      const x = (l + r) / 2;
+      const y = (t + b) / 2;
+      if (rects.some((q) => inRect(x, y, q))) return 2;
+      if (rects.some((q) => y >= q[1] - pad && y <= q[3] + pad)) return 1;
+      if (near.some((q) => inRect(x, y, q))) return 0;
+      return null;
+    });
+    return hit ? /** @type {number[][]} */ (seen.get(hit.index)) : null;
+  }
+
   /** Fill `holder` with one bar per rect. @param {HTMLElement} holder @param {number} page @param {number[][]} rects @param {string} cls */
   function draw(holder, page, rects, cls) {
     holder.replaceChildren();
@@ -167,7 +311,8 @@ export function setupSynctex({ pdfViewer, eventBus, container, post }) {
     const reqId = ++state.reqSeq;
     pending.set(reqId, at);
     lastLookupAt = Date.now();
-    post({ type: "synctexHover", reqId, page: at.page, x: at.x, y: at.y });
+    const anchor = anchorAt(at.page, state.pointer.x, state.pointer.y);
+    post({ type: "synctexHover", reqId, page: at.page, x: at.x, y: at.y, ...(anchor ? { anchor } : {}) });
   }
 
   /**
@@ -197,7 +342,15 @@ export function setupSynctex({ pdfViewer, eventBus, container, post }) {
     if (hit.text) {
       const body = document.createElement("div");
       body.className = "synctexLine";
-      body.textContent = hit.text;
+      const em = Array.isArray(hit.em) && hit.em.length === 2 && hit.em.every(Number.isInteger) && hit.em[0] < hit.em[1] ? hit.em : null;
+      if (em) {
+        const word = document.createElement("b");
+        word.className = "synctexWord";
+        word.textContent = hit.text.slice(em[0], em[1]);
+        body.append(hit.text.slice(0, em[0]), word, hit.text.slice(em[1]));
+      } else {
+        body.textContent = hit.text;
+      }
       tip.append(body);
     }
     tip.hidden = false;
@@ -266,6 +419,10 @@ export function setupSynctex({ pdfViewer, eventBus, container, post }) {
     if (hover.childElementCount || !tip.hidden) schedule();
   }, { passive: true });
   eventBus.on("scalechanging", hide);
+  eventBus.on("textlayerrendered", (/** @type {{pageNumber: number}} */ e) => {
+    const div = pdfViewer.getPageView(e.pageNumber - 1)?.textLayer?.div;
+    if (div) wordsCache.delete(div);
+  });
   eventBus.on("pagesinit", () => {
     hide();
     flashBox.replaceChildren();
@@ -273,7 +430,7 @@ export function setupSynctex({ pdfViewer, eventBus, container, post }) {
 
   // Ctrl+click: inverse search. It wins over links, selection and the marking UI (a
   // plain click still does those).
-  /** @type {{x: number, y: number, at: {page: number, x: number, y: number}} | null} */
+  /** @type {{x: number, y: number, at: {page: number, x: number, y: number}, anchor: any} | null} */
   let down = null;
   container.addEventListener("mousedown", (e) => {
     down = null;
@@ -282,7 +439,7 @@ export function setupSynctex({ pdfViewer, eventBus, container, post }) {
     if (!at) return;
     e.preventDefault();
     e.stopPropagation();
-    down = { x: e.clientX, y: e.clientY, at };
+    down = { x: e.clientX, y: e.clientY, at, anchor: anchorAt(at.page, e.clientX, e.clientY) };
   }, true);
   container.addEventListener("mouseup", (e) => {
     const d = down;
@@ -291,7 +448,7 @@ export function setupSynctex({ pdfViewer, eventBus, container, post }) {
     e.preventDefault();
     e.stopPropagation();
     if (Math.hypot(e.clientX - d.x, e.clientY - d.y) > 5) return;
-    post({ type: "synctexEdit", page: d.at.page, x: d.at.x, y: d.at.y });
+    post({ type: "synctexEdit", page: d.at.page, x: d.at.x, y: d.at.y, ...(d.anchor ? { anchor: d.anchor } : {}) });
   }, true);
   container.addEventListener("click", (e) => {
     if (!state.available || !ctrlOf(e) || inUi(e.target)) return;
@@ -302,28 +459,52 @@ export function setupSynctex({ pdfViewer, eventBus, container, post }) {
   // ---- forward search -----------------------------------------------------------------
   /** @type {ReturnType<typeof setTimeout> | undefined} */
   let flashTimer;
-  /**
-   * Scroll `rects` (SyncTeX, on `page`) into view, a third down from the top, and flash
-   * them for a moment. Needs the pages laid out (viewer.js waits for that).
-   * @param {number} page @param {number[][]} rects
-   */
-  function flash(page, rects) {
+  let flashSeq = 0;
+  /** @param {unknown} rects @returns {number[][]} */
+  const validRects = (rects) => (Array.isArray(rects)
+    ? rects.filter((r) => Array.isArray(r) && r.length === 4 && r.every(Number.isFinite)) : []);
+
+  /** Scroll `rects` (SyncTeX, on `page`) into view, a third down from the top. @param {number} page @param {number[][]} list */
+  function scrollTo(page, list) {
     const view = pdfViewer.getPageView(page - 1);
-    const list = Array.isArray(rects) ? rects.filter((r) => Array.isArray(r) && r.length === 4 && r.every(Number.isFinite)) : [];
-    if (!view || !view.viewport) {
+    if (!list.length || !view?.viewport) {
       pdfViewer.currentPageNumber = page;
       return;
     }
-    if (list.length) {
-      const vb = view.viewport.viewBox;
-      const top = Math.min(...list.map((r) => r[1]));
-      const [, , , y1] = synctexRectToPdf([0, top, 0, top], vb);
-      const offset = (container.clientHeight * 0.33) / (view.viewport.scale || 1);
-      pdfViewer.scrollPageIntoView({ pageNumber: page, destArray: [null, { name: "XYZ" }, null, Math.min(vb[3], y1 + offset), null],
-        allowNegativeOffset: true });
-    } else {
-      pdfViewer.currentPageNumber = page;
-    }
+    const vb = view.viewport.viewBox;
+    const top = Math.min(...list.map((r) => r[1]));
+    const [, , , y1] = synctexRectToPdf([0, top, 0, top], vb);
+    const offset = (container.clientHeight * 0.33) / (view.viewport.scale || 1);
+    pdfViewer.scrollPageIntoView({ pageNumber: page, destArray: [null, { name: "XYZ" }, null, Math.min(vb[3], y1 + offset), null],
+      allowNegativeOffset: true });
+  }
+
+  /** Are all of `rects` inside the visible area? @param {number} page @param {number[][]} list */
+  function inView(page, list) {
+    const c = container.getBoundingClientRect();
+    return clientRects(page, list).every((r) => r.top >= c.top && r.bottom <= c.bottom && r.left >= c.left && r.right <= c.right);
+  }
+
+  /** Resolves (true) once pdf.js has rendered the page's text layer, or (false) after a while. @param {number} page */
+  function whenTextLayer(page) {
+    if (textLayerOf(page)) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      /** @param {boolean} ok */
+      const done = (ok) => {
+        clearTimeout(timer);
+        eventBus.off("textlayerrendered", on);
+        resolve(ok);
+      };
+      const on = (/** @type {{pageNumber: number}} */ e) => {
+        if (e.pageNumber === page && textLayerOf(page)) done(true);
+      };
+      const timer = setTimeout(() => done(!!textLayerOf(page)), TEXT_LAYER_WAIT_MS);
+      eventBus.on("textlayerrendered", on);
+    });
+  }
+
+  /** Flash `list` on `page` for a moment. @param {number} page @param {number[][]} list */
+  function show(page, list) {
     clearTimeout(flashTimer);
     draw(flashBox, page, list, "bar");
     flashBox.classList.remove("fading");
@@ -333,6 +514,48 @@ export function setupSynctex({ pdfViewer, eventBus, container, post }) {
       flashBox.replaceChildren();
       flashBox.classList.remove("fading");
     }, FLASH_MS);
+  }
+
+  /**
+   * Scroll `rects` (SyncTeX, on `page`: a source line's boxes) into view, a third down
+   * from the top, and flash them for a moment. With an `anchor` (the word at the cursor),
+   * once the page's text layer is there, flash just that word if it is found on or around
+   * those boxes or in the `near` ones; else the boxes. Needs the pages laid out (viewer.js
+   * waits for that).
+   * @param {number} page @param {number[][]} rects
+   * @param {{anchor?: any, near?: {page: number, rects: number[][]}[]}} [opts]
+   */
+  function flash(page, rects, { anchor = null, near = [] } = {}) {
+    const view = pdfViewer.getPageView(page - 1);
+    const list = validRects(rects);
+    if (!view || !view.viewport) {
+      pdfViewer.currentPageNumber = page;
+      return;
+    }
+    scrollTo(page, list);
+    const seq = ++flashSeq;
+    if (!validAnchor(anchor)) {
+      show(page, list);
+      return;
+    }
+    clearTimeout(flashTimer);
+    flashBox.replaceChildren();
+    const areas = (Array.isArray(near) ? near : []).filter((a) => a && Number.isInteger(a.page))
+      .map((a) => ({ page: a.page, rects: validRects(a.rects) }));
+    void whenTextLayer(page).then(() => {
+      if (seq !== flashSeq) return;
+      let at = page;
+      let found = findWords(page, list, anchor, areas.filter((a) => a.page === page).flatMap((a) => a.rects));
+      for (const a of areas) {
+        if (found) break;
+        if (a.page === page) continue;
+        found = findWords(a.page, [], anchor, a.rects);
+        at = a.page;
+      }
+      if (!found) at = page;
+      if (found && !inView(at, found)) scrollTo(at, found);
+      show(at, found || list);
+    });
   }
 
   // ---- the selection's rects ----------------------------------------------------------
@@ -368,13 +591,7 @@ export function setupSynctex({ pdfViewer, eventBus, container, post }) {
       if (!r.toString().trim()) continue;
       let part = parts[parts.length - 1];
       if (!part || part.page !== page) parts.push((part = { page, rects: [] }));
-      for (const cr of r.getClientRects()) {
-        if (cr.width < 0.5 || cr.height < 0.5) continue;
-        const a = pdfToSynctex(g.viewport.convertToPdfPoint(cr.left - g.origin.left, cr.top - g.origin.top), g.viewport.viewBox);
-        const b = pdfToSynctex(g.viewport.convertToPdfPoint(cr.right - g.origin.left, cr.bottom - g.origin.top), g.viewport.viewBox);
-        const q = (/** @type {number} */ v) => Math.round(v * 100) / 100;
-        part.rects.push([q(Math.min(a[0], b[0])), q(Math.min(a[1], b[1])), q(Math.max(a[0], b[0])), q(Math.max(a[1], b[1]))]);
-      }
+      part.rects.push(...synctexRects(r.getClientRects(), g));
     }
     return parts.filter((p) => p.rects.length);
   }

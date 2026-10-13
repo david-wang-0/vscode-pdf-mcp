@@ -101,7 +101,7 @@ let lastView = null;
 let deferred = null;
 /** A goto received while hidden, re-applied when shown. @type {number | null} */
 let pendingPage = null;
-/** A forward search's flash received before the pages could show it. @type {{page: number, rects: number[][]} | null} */
+/** A forward search's flash received before the pages could show it. @type {{page: number, rects: number[][], anchor?: any, near?: any} | null} */
 let pendingFlash = null;
 
 /** Whether VS Code shows this tab (told by the extension); a hidden tab may still have a layout. */
@@ -119,7 +119,7 @@ function onShown() {
     const f = pendingFlash;
     pendingFlash = null;
     pendingPage = null;
-    synctex.flash(f.page, f.rects);
+    synctex.flash(f.page, f.rects, f);
     return;
   }
   if (pendingPage !== null) {
@@ -453,17 +453,17 @@ handle = (msg) => {
       const v = { page: msg.page, ratio: 0, left: 0, scale: (restoreView || lastView)?.scale || "page-width" };
       if (restoreView) restoreView = v;
       else lastView = v;
-      if (forward) pendingFlash = { page: msg.page, rects: msg.rects };
+      if (forward) pendingFlash = { page: msg.page, rects: msg.rects, anchor: msg.anchor, near: msg.near };
       post({ type: "gotoDone", reqId: msg.reqId, page: msg.page });
       return;
     }
     if (pdfDocument && msg.page >= 1 && msg.page <= pdfViewer.pagesCount) {
-      if (forward && isVisible()) synctex.flash(msg.page, msg.rects);
+      if (forward && isVisible()) synctex.flash(msg.page, msg.rects, msg);
       else pdfViewer.currentPageNumber = msg.page;
       if (!isVisible()) {
         // scroll again (and flash) once there is a layout
         pendingPage = msg.page;
-        if (forward) pendingFlash = { page: msg.page, rects: msg.rects };
+        if (forward) pendingFlash = { page: msg.page, rects: msg.rects, anchor: msg.anchor, near: msg.near };
       }
       lastView = captureView() || { page: msg.page, ratio: 0, left: 0, scale: lastView?.scale || "page-width" };
     }
