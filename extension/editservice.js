@@ -25,8 +25,13 @@ class EditServiceUnavailable extends Error {
   }
 }
 
-/** The protocol version this client speaks (`ping` answers `{version}`). */
-const PROTOCOL_VERSION = 1;
+/**
+ * The protocol versions this client speaks (`ping` answers `{version}`): 1 for marking,
+ * 2 adds `sync` (marks into the LaTeX source). A version adds ops and fields, so a newer
+ * service is accepted too.
+ */
+const MIN_PROTOCOL_VERSION = 1;
+const PROTOCOL_VERSION = 2;
 
 class EditService {
   /**
@@ -42,7 +47,7 @@ class EditService {
     /** @type {import("node:child_process").ChildProcessWithoutNullStreams | null} */
     this.child = null;
     this.seq = 0;
-    /** @type {Map<number, {resolve: (v: any) => void, reject: (e: Error) => void, timer: ReturnType<typeof setTimeout>, op: string, child: any}>} */
+    /** @type {Map<number, {resolve: (v: any) => void, reject: (e: Error) => void, timer: ReturnType<typeof setTimeout> | undefined, op: string, child: any, timeoutMs: number}>} */
     this.pending = new Map();
     this.buf = "";
     /** Number of processes started so far (for tests and the log). */
@@ -153,18 +158,40 @@ class EditService {
       }
       this.pending.delete(msg.id);
       clearTimeout(p.timer);
+      this.arm(p.child);
       if (msg.ok === true) p.resolve(msg.result);
       else p.reject(new EditServiceError(typeof msg.error === "string" ? msg.error : `${p.op} failed`));
     }
   }
 
   /**
+   * Start the clock of the oldest request `child` has not answered. The service handles
+   * requests in order, so a request's time starts when the one before it is answered: a
+   * long `sync` does not make the requests queued behind it time out.
+   * @param {any} child
+   */
+  arm(child) {
+    for (const [id, p] of this.pending) {
+      if (p.child !== child) continue;
+      if (p.timer) return;
+      p.timer = setTimeout(() => {
+        if (!this.pending.has(id)) return;
+        // A hung service would answer everything late: give up on it and start afresh.
+        this.abandon(child, new EditServiceUnavailable(`edit service did not answer ${p.op} within ${Math.round(p.timeoutMs / 1000)} s`));
+        child.kill("SIGKILL");
+      }, p.timeoutMs);
+      return;
+    }
+  }
+
+  /**
    * Send one request; resolves with `result`, rejects with EditServiceError (the service's
    * message) or EditServiceUnavailable. Fields that are `undefined` are left out.
-   * @param {string} op @param {Record<string, unknown>} [fields]
+   * `timeoutMs` (default: the service's) counts from when the service gets to it.
+   * @param {string} op @param {Record<string, unknown>} [fields] @param {{timeoutMs?: number}} [opts]
    * @returns {Promise<any>}
    */
-  request(op, fields = {}) {
+  request(op, fields = {}, { timeoutMs = this.timeoutMs } = {}) {
     return new Promise((resolve, reject) => {
       let child;
       try {
@@ -174,14 +201,9 @@ class EditService {
         return;
       }
       const id = ++this.seq;
-      const timer = setTimeout(() => {
-        if (!this.pending.has(id)) return;
-        // A hung service would answer everything late: give up on it and start afresh.
-        this.abandon(child, new EditServiceUnavailable(`edit service did not answer ${op} within ${Math.round(this.timeoutMs / 1000)} s`));
-        child.kill("SIGKILL");
-      }, this.timeoutMs);
-      this.pending.set(id, { resolve, reject, timer, op, child });
+      this.pending.set(id, { resolve, reject, timer: undefined, op, child, timeoutMs });
       this.send(JSON.stringify({ id, op, ...fields }) + "\n");
+      this.arm(child);
     });
   }
 
@@ -192,9 +214,9 @@ class EditService {
   async probe() {
     try {
       const r = await this.request("ping");
-      if (!r || r.version !== PROTOCOL_VERSION) {
+      if (!r || !Number.isInteger(r.version) || r.version < MIN_PROTOCOL_VERSION) {
         return { ok: false, missing: false,
-          reason: `${this.command} speaks edit protocol ${r?.version}, this viewer needs ${PROTOCOL_VERSION}: update pdf-reader-writer-mcp or vscode-pdf-mcp` };
+          reason: `${this.command} speaks edit protocol ${r?.version}, this viewer needs ${MIN_PROTOCOL_VERSION} or newer: update pdf-reader-writer-mcp` };
       }
       return { ok: true, version: r.version };
     } catch (e) {
@@ -216,4 +238,4 @@ class EditService {
   }
 }
 
-module.exports = { EditService, EditServiceError, EditServiceUnavailable, PROTOCOL_VERSION };
+module.exports = { EditService, EditServiceError, EditServiceUnavailable, PROTOCOL_VERSION, MIN_PROTOCOL_VERSION };

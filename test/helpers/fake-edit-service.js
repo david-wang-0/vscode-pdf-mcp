@@ -8,7 +8,8 @@
  *
  * Test-only ops: `__crash` (exit 3 at once), `__split` (answer in three writes),
  * `__noise` (a non-JSON line and an unmatched response before the answer),
- * `__hang` (never answer).
+ * `__hang` (never answer), `__slow {ms}` (answer after `ms`, holding up the requests
+ * behind it, as the real service handles one at a time).
  */
 "use strict";
 
@@ -224,6 +225,12 @@ function handle(op, req) {
 const write = (obj) => process.stdout.write(JSON.stringify(obj) + "\n");
 
 let buf = "";
+/** Lines waiting while `__slow` holds the service. @type {string[]} */
+const queue = [];
+let busy = false;
+const drain = () => {
+  while (!busy && queue.length) onLine(/** @type {string} */ (queue.shift()));
+};
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
   buf += chunk;
@@ -231,8 +238,9 @@ process.stdin.on("data", (chunk) => {
   while ((i = buf.indexOf("\n")) >= 0) {
     const line = buf.slice(0, i);
     buf = buf.slice(i + 1);
-    if (line.trim()) onLine(line);
+    if (line.trim()) queue.push(line);
   }
+  drain();
 });
 process.stdin.on("end", () => process.exit(0));
 
@@ -252,6 +260,15 @@ function onLine(line) {
   const { id, op, ...rest } = req;
   if (op === "__crash") process.exit(3);
   if (op === "__hang") return;
+  if (op === "__slow") {
+    busy = true;
+    setTimeout(() => {
+      write({ id, ok: true, result: { slow: true } });
+      busy = false;
+      drain();
+    }, Number(rest.ms) || 0);
+    return;
+  }
   if (op === "__split") {
     const s = JSON.stringify({ id, ok: true, result: { split: true } }) + "\n";
     process.stdout.write(s.slice(0, 5));

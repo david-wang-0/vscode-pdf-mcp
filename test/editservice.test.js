@@ -102,11 +102,25 @@ test("edit service: a missing executable is reported as missing, naming pdf-read
   await assert.rejects(s.request("ping"), (e) => e instanceof EditServiceUnavailable && e.missing);
 });
 
-test("edit service: a different protocol version turns marking off", async () => {
-  const s = fake({ env: { ...process.env, FAKE_EDIT_VERSION: "2" } });
-  const r = await s.probe();
+test("edit service: protocol 2 (and newer) is accepted, an older one turns marking off", async () => {
+  assert.deepEqual(await fake({ env: { ...process.env, FAKE_EDIT_VERSION: "2" } }).probe(), { ok: true, version: 2 });
+  assert.deepEqual(await fake({ env: { ...process.env, FAKE_EDIT_VERSION: "3" } }).probe(), { ok: true, version: 3 });
+  const r = await fake({ env: { ...process.env, FAKE_EDIT_VERSION: "0" } }).probe();
   assert.equal(r.ok, false);
-  assert.match(/** @type {any} */ (r).reason, /protocol 2, this viewer needs 1/);
+  assert.match(/** @type {any} */ (r).reason, /protocol 0, this viewer needs 1 or newer/);
+});
+
+test("edit service: a request's time counts from when the service gets to it", async () => {
+  const s = fake({ timeoutMs: 300 });
+  await s.request("ping");
+  // a long request (a sync) with its own timeout, and a short one queued behind it
+  const slow = s.request("__slow", { ms: 600 }, { timeoutMs: 5000 });
+  const ping = s.request("ping");
+  assert.deepEqual(await slow, { slow: true });
+  assert.deepEqual(await ping, { version: 1 });
+  assert.equal(s.starts, 1, "nothing timed out");
+  // the default still applies to a request the service sits on
+  await assert.rejects(s.request("__slow", { ms: 2000 }), /did not answer __slow within/);
 });
 
 test("edit service: a hung request times out, and the process is replaced", async () => {

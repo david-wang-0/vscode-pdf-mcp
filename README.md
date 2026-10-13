@@ -258,9 +258,11 @@ the PDF fresh under an exclusive `flock` on the file, adds or changes the annota
 PyMuPDF and saves incrementally, so a mark from the viewer and one from the agent at the
 same moment never lose each other. Selections go over as rects in PDF user space (pdf.js
 `convertToPdfPoint`), one per text run, and the service snaps them to whole words. The
-service is restarted on the next action if it dies; if it is missing or speaks another
-protocol version, the mark tools are disabled with the reason in their tooltips and one
-warning per window. The extension never writes PDF bytes itself and does not use pdf.js's
+service is restarted on the next action if it dies; if it is missing or speaks a
+protocol version older than 1, the mark tools are disabled with the reason in their
+tooltips and one warning per window (a newer version is accepted: versions add ops and
+fields). Requests are answered one at a time, and each has 30 s from when the service gets
+to it. The extension never writes PDF bytes itself and does not use pdf.js's
 annotation editor.
 
 ## SyncTeX
