@@ -57,6 +57,12 @@ window.__reload = async (reload = true) => {
     res.end(renderHtml({ cspSource: origin, nonce: n, uri: (rel) => `${origin}/${rel}`, extraHead: mock }));
     return;
   }
+  // no icon, and no 404 for it in the console (Chromium asks for one)
+  if (url.pathname === "/favicon.ico") {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
   const file = url.pathname === "/__pdf" ? pdf : path.join(root, decodeURIComponent(url.pathname));
   const allowed = file === pdf || file.startsWith(path.join(root, "media") + path.sep)
     || file.startsWith(path.join(root, "node_modules", "pdfjs-dist") + path.sep);
