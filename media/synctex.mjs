@@ -15,8 +15,10 @@
  * which calls `flash`.)
  */
 
-/** How long the pointer must rest before a lookup (ms). */
+/** After a scroll, how long the view must rest before a lookup (ms). */
 const HOVER_DEBOUNCE_MS = 40;
+/** A moving pointer is looked up at once, then at most this often (ms); a lookup is cheap. */
+const HOVER_FOLLOW_MS = 25;
 /** A Ctrl+wheel gesture hides the underline until this long after its last event (ms). */
 const WHEEL_QUIET_MS = 300;
 /** How long a forward search's flash stays (ms). */
@@ -46,7 +48,10 @@ export function synctexRectToPdf(r, viewBox) {
 export function setupSynctex({ pdfViewer, eventBus, container, post }) {
   const state = {
     available: false,
+    /** Ctrl as the mouse events report it. */
     ctrl: false,
+    /** Ctrl held by its keydown (no keyup or blur since): mouse events may not report it. */
+    keyCtrl: false,
     /** @type {{x: number, y: number} | null} */
     pointer: null,
     reqSeq: 0,
@@ -54,8 +59,12 @@ export function setupSynctex({ pdfViewer, eventBus, container, post }) {
   };
   /** @type {ReturnType<typeof setTimeout> | undefined} */
   let timer;
-  /** Where the last lookup was made. @type {{page: number, x: number, y: number} | null} */
-  let pendingAt = null;
+  /** Lookups in flight: reqId -> where it was made. @type {Map<number, {page: number, x: number, y: number}>} */
+  const pending = new Map();
+  /** Answers to requests below this are dropped (made before a hide); so are ones older than the shown one. */
+  let validFrom = 1;
+  let shownReq = 0;
+  let lastLookupAt = 0;
 
   const layer = document.createElement("div");
   layer.id = "synctexLayer";
@@ -130,15 +139,21 @@ export function setupSynctex({ pdfViewer, eventBus, container, post }) {
     }
   }
 
-  function hide() {
-    clearTimeout(timer);
+  function clearShown() {
     hover.replaceChildren();
     tip.hidden = true;
     document.body.classList.remove("synctex-hover");
-    state.reqSeq++; // drop answers in flight
   }
 
-  const wanted = () => state.available && state.ctrl && !!state.pointer && Date.now() >= state.quietUntil;
+  function hide() {
+    clearTimeout(timer);
+    clearShown();
+    validFrom = state.reqSeq + 1; // drop answers in flight
+    pending.clear();
+  }
+
+  const ctrlHeld = () => state.ctrl || state.keyCtrl;
+  const wanted = () => state.available && ctrlHeld() && !!state.pointer && Date.now() >= state.quietUntil;
 
   function schedule(ms = HOVER_DEBOUNCE_MS) {
     clearTimeout(timer);
@@ -149,14 +164,29 @@ export function setupSynctex({ pdfViewer, eventBus, container, post }) {
     if (!wanted() || !state.pointer) return hide();
     const at = pagePoint(state.pointer.x, state.pointer.y);
     if (!at) return hide();
-    pendingAt = at;
-    post({ type: "synctexHover", reqId: ++state.reqSeq, page: at.page, x: at.x, y: at.y });
+    const reqId = ++state.reqSeq;
+    pending.set(reqId, at);
+    lastLookupAt = Date.now();
+    post({ type: "synctexHover", reqId, page: at.page, x: at.x, y: at.y });
   }
 
-  /** @param {any} hit */
-  function showHit(hit) {
-    const at = pendingAt;
-    if (!hit || !at || !wanted() || !state.pointer) return hide();
+  /**
+   * An answer: shown unless a newer one is (while the pointer moves, answers to earlier
+   * lookups still show, so the underline follows without waiting for the pointer to rest).
+   * @param {number} reqId @param {any} hit
+   */
+  function answer(reqId, hit) {
+    const at = pending.get(reqId);
+    if (!at || reqId < validFrom || reqId <= shownReq) return;
+    for (const k of pending.keys()) if (k <= reqId) pending.delete(k);
+    shownReq = reqId;
+    showHit(at, hit);
+  }
+
+  /** @param {{page: number, x: number, y: number}} at @param {any} hit */
+  function showHit(at, hit) {
+    if (!wanted() || !state.pointer) return hide();
+    if (!hit) return clearShown();
     draw(hover, at.page, Array.isArray(hit.rects) ? hit.rects : [], "bar");
     document.body.classList.add("synctex-hover");
     tip.replaceChildren();
@@ -190,29 +220,38 @@ export function setupSynctex({ pdfViewer, eventBus, container, post }) {
   /** @param {EventTarget | null} t */
   const inUi = (t) => t instanceof Element && !!t.closest(".vpdf-ui");
 
+  // Ctrl may come before or after the pointer arrives, and the pointer may move on while
+  // it is held: the underline and tip follow whatever is under it. Pointer moves do not
+  // always report a held Ctrl (seen under Wayland), so a Ctrl keydown counts until its keyup.
   container.addEventListener("pointermove", (e) => {
     state.pointer = { x: e.clientX, y: e.clientY };
-    const ctrl = ctrlOf(e);
-    if (ctrl !== state.ctrl) state.ctrl = ctrl;
-    if (!ctrl || e.buttons) return hide();
-    if (state.available) schedule();
+    state.ctrl = ctrlOf(e);
+    if (!ctrlHeld() || e.buttons) return hide();
+    if (state.available) schedule(Math.max(0, lastLookupAt + HOVER_FOLLOW_MS - Date.now()));
   }, { passive: true });
   container.addEventListener("pointerleave", () => {
     state.pointer = null;
     hide();
   });
   window.addEventListener("keydown", (e) => {
-    if (e.key !== "Control" && e.key !== "Meta") return;
-    state.ctrl = true;
+    if (e.key !== "Control" && e.key !== "Meta") {
+      // a key without Ctrl: a keyup we missed
+      if (!ctrlOf(e) && ctrlHeld()) {
+        state.ctrl = state.keyCtrl = false;
+        hide();
+      }
+      return;
+    }
+    state.keyCtrl = true;
     if (state.available && state.pointer) schedule(0);
   }, true);
   window.addEventListener("keyup", (e) => {
     if (e.key !== "Control" && e.key !== "Meta") return;
-    state.ctrl = false;
+    state.ctrl = state.keyCtrl = false;
     hide();
   }, true);
   window.addEventListener("blur", () => {
-    state.ctrl = false;
+    state.ctrl = state.keyCtrl = false;
     hide();
   });
   // Ctrl+wheel (and pinch) zooms: no underline during the gesture; it comes back after it.
@@ -349,12 +388,12 @@ export function setupSynctex({ pdfViewer, eventBus, container, post }) {
         state.available = !!msg.available;
         document.body.classList.toggle("synctex", state.available);
         if (!state.available) hide();
-        else if (state.ctrl && state.pointer) schedule(0);
+        else if (ctrlHeld() && state.pointer) schedule(0);
         if (was !== state.available) onAvailability(state.available);
         return true;
       }
       case "synctexHit":
-        if (msg.reqId === state.reqSeq) showHit(msg.hit);
+        answer(msg.reqId, msg.hit);
         return true;
       default:
         return false;

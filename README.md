@@ -275,9 +275,12 @@ writing it), and dropped when it disappears.
 - **Ctrl + hover.** Hold Ctrl over a page: the text that Ctrl+click would jump to (the
   stretch of the printed line under the pointer that comes from one source line) gets a
   grey underline, and a tip next to the pointer shows `<file>:<line>` (relative to the
-  workspace) and that source line's text. Both go when you release Ctrl or leave the
-  page, and during a Ctrl+wheel (or pinch) zoom. They do not catch the pointer, so
-  selection, marks and popovers work as before.
+  workspace) and that source line's text. Ctrl can go down before or after the pointer
+  arrives, and while it is held both follow the pointer as it moves. Both go when you
+  release Ctrl or leave the page, and during a Ctrl+wheel (or pinch) zoom. They do not
+  catch the pointer, so selection, marks and popovers work as before. (Pointer moves do not
+  always report a held Ctrl, as seen under Wayland: the viewer also goes by the Ctrl key
+  itself, which it sees when its tab has the keyboard focus.)
 - **Ctrl + click** opens the source at that line (inverse search): in an editor that
   already shows the file, else in a group that has it open, else in the group right of
   the PDF's or the text group you used last, else in a new group beside the PDF; never in

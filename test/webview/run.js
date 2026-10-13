@@ -728,6 +728,80 @@ test("SyncTeX: Ctrl+hover shows a grey underline and a file:line tip from the ex
   await page.close();
 });
 
+test("SyncTeX: Ctrl after the pointer rests also shows it; with Ctrl held the underline follows the pointer, even when moves do not report Ctrl", async () => {
+  const pdf = path.join(tmp, "stx-follow.pdf");
+  fs.writeFileSync(pdf, samplePdf(3));
+  const { page, errors } = await open(await serve(pdf));
+  await page.evaluate(() => /** @type {any} */ (window).__send({ type: "synctex", available: true }));
+  const spanAt = async (/** @type {string} */ text) => {
+    const b = await page.locator(".page[data-page-number='1'] .textLayer span").filter({ hasText: text }).first().boundingBox();
+    assert.ok(b);
+    return { x: b.x + 40, y: b.y + b.height / 2 };
+  };
+  const a = await spanAt("Reachability of timed automata");
+  const c = await spanAt("Filler line 6 on page 1");
+  const tip = page.locator(".synctexTip:visible .synctexWhere");
+
+  // the pointer rests first, then Ctrl goes down: a lookup without moving
+  await page.mouse.move(a.x, a.y);
+  await page.waitForTimeout(100);
+  let mark = await count(page);
+  await page.keyboard.down("Control");
+  const r1 = /** @type {any} */ (await posted(page, { type: "synctexHover" }, mark));
+  assert.ok(Math.abs(r1.y - 97) < 6, `y ${r1.y}`);
+  await answerHover(page, { file: "/proj/main.tex", rel: "main.tex", line: 12, column: null, text: "", rects: [lineRect(2)] });
+  await page.locator(".synctexTip:visible .synctexWhere", { hasText: "main.tex:12" }).waitFor();
+
+  // moving on with Ctrl held, in moves that report no Ctrl (Wayland): a new lookup there
+  mark = await count(page);
+  await page.evaluate(({ x, y }) => {
+    const target = document.elementFromPoint(x, y) || document.body;
+    target.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, clientX: x, clientY: y, ctrlKey: false }));
+  }, c);
+  const r2 = /** @type {any} */ (await posted(page, { type: "synctexHover" }, mark));
+  assert.ok(r2.y > r1.y + 40, `followed down: ${r1.y} -> ${r2.y}`);
+  await answerHover(page, { file: "/proj/main.tex", rel: "main.tex", line: 20, column: null, text: "", rects: [lineRect(6)] });
+  await page.locator(".synctexTip:visible .synctexWhere", { hasText: "main.tex:20" }).waitFor();
+
+  // a steady move keeps looking up on the way, not only once the pointer stops
+  mark = await count(page);
+  for (let i = 0; i < 12; i++) {
+    await page.mouse.move(c.x + 3 * i, c.y - 4 * i);
+    await page.waitForTimeout(25);
+  }
+  const during = await page.evaluate((from) => /** @type {any} */ (window).__posted.slice(from).filter((/** @type {any} */ m) => m.type === "synctexHover").length, mark);
+  assert.ok(during >= 1, `lookups while moving: ${during}`);
+
+  // answers come back after the pointer has moved on: an earlier one still shows, an
+  // older one than the shown one does not
+  await page.waitForTimeout(100);
+  const reqs = [];
+  for (const dy of [0, 14]) {
+    mark = await count(page);
+    await page.mouse.move(a.x, a.y + dy);
+    reqs.push(/** @type {any} */ (await posted(page, { type: "synctexHover" }, mark)).reqId);
+    await page.waitForTimeout(60);
+  }
+  const reply = (/** @type {number} */ reqId, /** @type {number} */ line) => page.evaluate(({ reqId, line, r }) =>
+    /** @type {any} */ (window).__send({ type: "synctexHit", reqId, hit: { file: "/proj/main.tex", rel: "main.tex", line, column: null, text: "", rects: [r] } }),
+  { reqId, line, r: lineRect(2) });
+  await reply(reqs[0], 31);
+  await page.locator(".synctexTip:visible .synctexWhere", { hasText: "main.tex:31" }).waitFor();
+  await reply(reqs[1], 32);
+  await page.locator(".synctexTip:visible .synctexWhere", { hasText: "main.tex:32" }).waitFor();
+  await reply(reqs[0], 33);
+  await page.waitForTimeout(100);
+  assert.equal(await tip.textContent(), "main.tex:32");
+
+  // releasing Ctrl ends it
+  await page.keyboard.up("Control");
+  await page.locator(".synctexTip").waitFor({ state: "hidden" });
+  assert.equal(await tip.count(), 0);
+
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
 test("SyncTeX: Ctrl+click posts the inverse search, also on a link (which it does not follow); without data it does nothing special", async () => {
   const pdf = path.join(tmp, "stx-click.pdf");
   fs.writeFileSync(pdf, samplePdf(3));

@@ -525,7 +525,25 @@ async function synctex(ext) {
       return expected;
     };
 
-    // 2. Ctrl+click on the \input file's text opens it at that line, beside the PDF.
+    // 2. Ctrl+hover over the \input file's text: the underline and the tip naming it.
+    if (f && page) {
+      const v = data0.view(chapter, 2);
+      const [l, t, r, b] = v.rects[0];
+      const at = await clientPoint(v.page, (l + r) / 2, t + (b - t) * 0.6);
+      await page.mouse.move(at.x - 20, at.y);
+      await page.keyboard.down("Control");
+      await page.mouse.move(at.x, at.y, { steps: 4 });
+      const tip = f.locator(".synctexTip:not([hidden])");
+      await tip.waitFor({ timeout: 5000 });
+      assert.match(await tip.innerText(), /chapters\/one\.tex:2/);
+      assert.ok(await f.locator(".synctexHover .bar").count() > 0, "the underline");
+      // the webview may not have the focus (then it sees no keys): the next move tells it
+      await page.keyboard.up("Control");
+      await page.mouse.move(at.x + 1, at.y);
+      await f.locator(".synctexTip").waitFor({ state: "hidden", timeout: 5000 });
+    }
+
+    // 3. Ctrl+click on the \input file's text opens it at that line, beside the PDF.
     if (f) {
       const hit = await ctrlClickLine(data0, chapter, 2);
       assert.deepEqual([hit.file, hit.line], [chapter, 2]);
