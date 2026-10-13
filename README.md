@@ -290,9 +290,10 @@ writing it), and dropped when it disappears.
   tab's own group. Ctrl+click on a link does SyncTeX, not the link (a plain click still
   follows links). Without SyncTeX data, Ctrl+click does nothing special.
 - **Forward search** (source line to PDF): **SyncTeX: show in PDF**
-  (`vscodePdfMcp.synctexForward`, in the command palette of a `.tex` editor; bind a key
-  to it if you like) takes the line and the word at the cursor (or the words of a
-  selection within the line). The PDF is the open one whose SyncTeX data has that file,
+  (`vscodePdfMcp.synctexForward`, in a `.tex` editor's right-click menu and command
+  palette; bind a key to it if you like) takes the line and the word at the cursor (or
+  the words of a selection within the line). A right-click puts the cursor where you
+  clicked (unless inside the selection), so the menu entry shows the word you clicked. The PDF is the open one whose SyncTeX data has that file,
   else `<root>.pdf` of a `% !TEX root = <root>.tex` magic comment in the file's first 20
   lines, else the PDF of the same base name. The viewer opens it (or reveals its tab,
   keeping the focus in your editor), scrolls to the line and flashes that word in grey

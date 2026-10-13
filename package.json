@@ -65,6 +65,13 @@
           "group": "navigation"
         }
       ],
+      "editor/context": [
+        {
+          "command": "vscodePdfMcp.synctexForward",
+          "when": "editorLangId == latex || editorLangId == tex || editorLangId == doctex || resourceExtname == .tex",
+          "group": "navigation@100"
+        }
+      ],
       "commandPalette": [
         {
           "command": "vscodePdfMcp.openExternal",
