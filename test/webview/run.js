@@ -6,8 +6,11 @@
  *   npm run test:webview
  *
  * Needs playwright-core (a devDependency) and a Chromium: set CHROMIUM to its executable,
- * else Playwright's own download is used. Set VPDF_PYTHON to a Python with pymupdf to also
- * check PyMuPDF-written annotations (underline, Text note) and links.
+ * else Playwright's own download is used (`node node_modules/playwright-core/cli.js install
+ * chromium-headless-shell` fetches the one this playwright-core expects). The check of
+ * PyMuPDF-written annotations (underline, Text note) and links needs a Python with pymupdf:
+ * VPDF_PYTHON, else that of pdf-reader-writer-mcp's installed edit service
+ * (test/helpers/prw.js); without one it is skipped.
  */
 "use strict";
 
@@ -19,8 +22,10 @@ const path = require("node:path");
 const { spawn, execFileSync } = require("node:child_process");
 const { chromium } = require("playwright-core");
 const { makePdf, samplePdf, sampleLines, threadPdf } = require("../helpers/pdf");
+const { findPrw } = require("../helpers/prw");
 
 const root = path.resolve(__dirname, "../..");
+const python = findPrw().python;
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "vpdf-webview-"));
 /** @type {import("node:child_process").ChildProcess[]} */
 const servers = [];
@@ -229,9 +234,9 @@ test("Ctrl+wheel zooms around the pointer; a plain wheel scrolls", async () => {
   await page.close();
 });
 
-test("PyMuPDF-written underline and Text note render; links work", { skip: !process.env.VPDF_PYTHON && "set VPDF_PYTHON to a python with pymupdf" }, async () => {
+test("PyMuPDF-written underline and Text note render; links work", { skip: !python && "set VPDF_PYTHON to a python with pymupdf" }, async () => {
   const pdf = path.join(tmp, "annotated.pdf");
-  execFileSync(/** @type {string} */ (process.env.VPDF_PYTHON), ["-I", path.join(root, "scripts/make-annotated-pdf.py"), pdf]);
+  execFileSync(python, ["-I", path.join(root, "scripts/make-annotated-pdf.py"), pdf]);
   const { page, errors } = await open(await serve(pdf));
   await page.waitForSelector(".page[data-page-number='1'] .annotationLayer section");
   assert.equal(await page.locator(".annotationLayer .underlineAnnotation").count(), 1);

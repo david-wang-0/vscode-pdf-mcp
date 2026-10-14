@@ -12,10 +12,17 @@
  * pdf-reader-writer-mcp: its edit service (VSCODE_PDF_MCP_EDIT_COMMAND, else
  * `pdf-reader-writer-edit` on PATH), its MCP server for the concurrency test (VPDF_PRW_MCP,
  * else `pdf-reader-writer-mcp` on PATH) and a Python with pymupdf to read the PDFs back
- * (VPDF_PYTHON). Without them that part is skipped, with a message. Marks into the LaTeX
- * source also need protocol 2 of the edit service and pdfnotes.sty: VPDF_PDFNOTES_DIR (a
- * directory with it), else the latex/ directory of a pdf-reader-writer-mcp checkout next to
- * this one, else wherever kpsewhich finds it.
+ * (VPDF_PYTHON, else the Python of the edit service's own environment). Without them that
+ * part is skipped, with a message. Marks into the LaTeX source also need protocol 2 of the
+ * edit service and pdfnotes.sty: VPDF_PDFNOTES_DIR (a directory with it), else the latex/
+ * directory of a pdf-reader-writer-mcp checkout next to this one or of the source tree the
+ * edit service was installed from, else wherever kpsewhich finds it (test/helpers/prw.js).
+ * The run ends with one line per part, ran or SKIPPED; VPDF_STRICT=1 turns a skip into a
+ * failure.
+ *
+ * Nothing of the user's VS Code is used: the user-data and extensions dirs, the extension's
+ * state dir (VSCODE_PDF_MCP_DIR) and the workspace are all in a fresh temp dir, VS Code's
+ * own variables of a calling VS Code terminal are dropped, and the suite checks all of it.
  */
 "use strict";
 
@@ -43,6 +50,11 @@ if (!process.env.VPDF_UNDER_XVFB) {
   delete env.ELECTRON_OZONE_PLATFORM_HINT;
   delete env.XDG_SESSION_TYPE;
   delete env.DISPLAY;
+  // Run from a VS Code terminal, the environment names that VS Code's IPC handles; the
+  // VS Code under test must not see them (nor run as plain Node).
+  for (const k of Object.keys(env)) {
+    if ((k.startsWith("VSCODE_") && !k.startsWith("VSCODE_PDF_MCP_") && k !== "VSCODE_VERSION") || k.startsWith("ELECTRON_")) delete env[k];
+  }
   const r = spawnSync(xvfb, ["-a", "-s", "-screen 0 1280x900x24", process.execPath, __filename], { env, stdio: "inherit" });
   process.exit(r.status ?? 1);
 }
@@ -50,6 +62,7 @@ if (!process.env.VPDF_UNDER_XVFB) {
 const { runTests } = require("@vscode/test-electron");
 const { samplePdf } = require("../helpers/pdf");
 const { HAVE_PDFLATEX, buildProject } = require("../helpers/latex");
+const { findPrw } = require("../helpers/prw");
 
 /** A free TCP port on 127.0.0.1. @returns {Promise<number>} */
 function freePort() {
@@ -66,12 +79,7 @@ function freePort() {
 async function main() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "vpdf-int-"));
   const cdpPort = await freePort();
-  const editCommand = process.env.VSCODE_PDF_MCP_EDIT_COMMAND || which("pdf-reader-writer-edit", process.env) || "";
-  const mcpCommand = process.env.VPDF_PRW_MCP || which("pdf-reader-writer-mcp", process.env) || "";
-  // pdfnotes.sty for the marks-into-source test: VPDF_PDFNOTES_DIR, else the latex/ of a
-  // pdf-reader-writer-mcp checkout next to this one (its pdfnotes worktree first)
-  const pdfnotesDir = process.env.VPDF_PDFNOTES_DIR || ["pdf-reader-writer-mcp-pdfnotes", "pdf-reader-writer-mcp"]
-    .map((d) => path.join(root, "..", d, "latex")).find((d) => fs.existsSync(path.join(d, "pdfnotes.sty"))) || "";
+  const { editCommand, mcpCommand, python, pdfnotesDir } = findPrw(process.env, root);
   // Keys the viewer handles are bound in VS Code too, to a visible command: if the viewer
   // let one through, an untitled editor would appear. "k" (not the viewer's) is the control.
   const user = path.join(tmp, "user-data", "User");
@@ -118,7 +126,7 @@ async function main() {
         VPDF_CDP_PORT: String(cdpPort),
         VSCODE_PDF_MCP_EDIT_COMMAND: editCommand,
         VPDF_PRW_MCP: mcpCommand,
-        VPDF_PYTHON: process.env.VPDF_PYTHON || "",
+        VPDF_PYTHON: python,
         VPDF_LATEX: HAVE_PDFLATEX ? "1" : "",
         VPDF_PDFNOTES_DIR: pdfnotesDir,
       },

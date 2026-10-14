@@ -20,6 +20,7 @@ const vscode = require("vscode");
 const backend = require("../../lib/backend");
 const { hookOutput } = require("../../lib/hook");
 const { samplePdf } = require("../helpers/pdf");
+const { stateDir } = require("../../lib/runtime");
 
 const dir = /** @type {string} */ (process.env.VSCODE_PDF_MCP_DIR);
 const tmp = /** @type {string} */ (process.env.VPDF_TEST_TMP);
@@ -65,6 +66,22 @@ function waitFor(fn, what, ms = 15000) {
   });
 }
 
+/**
+ * The parts of the suite and how they went, printed at the end: "ran" or "SKIPPED: <why>".
+ * With VPDF_STRICT=1 a skipped part fails the run.
+ * @type {[string, string][]}
+ */
+const parts = [];
+/** @param {string} name */
+const ran = (name) => {
+  parts.push([name, "ran"]);
+};
+/** @param {string} name @param {string} why */
+const skipped = (name, why) => {
+  console.log(`integration: ${name} SKIPPED: ${why}`);
+  parts.push([name, `SKIPPED: ${why}`]);
+};
+
 /** This window's panel for `file`, from the state file. @param {string} file */
 function panelFor(file) {
   const mine = backend.readStates(dir).find((s) => s.pid === process.pid);
@@ -72,11 +89,34 @@ function panelFor(file) {
 }
 
 async function run() {
+  try {
+    await runParts();
+  } finally {
+    console.log(parts.map(([name, how]) => `integration: ${name}: ${how}`).join("\n"));
+  }
+  const left = parts.filter(([, how]) => how !== "ran");
+  if (process.env.VPDF_STRICT === "1" && left.length) throw new Error(`VPDF_STRICT=1: ${left.length} part(s) skipped`);
+}
+
+async function runParts() {
   const ext = vscode.extensions.all.find((e) => e.packageJSON.name === "vscode-pdf-mcp");
   assert.ok(ext, "extension present");
   await ext.activate();
   await waitFor(() => fs.existsSync(path.join(dir, `${process.pid}.json`)) && fs.existsSync(path.join(dir, `${process.pid}.sock`)),
     "state file and socket");
+
+  // 0. Nothing of the user's VS Code: the state dir, the user-data dir (the extension's
+  //    global storage) and the extensions dir (no extension but ours and the built-ins) are
+  //    the runner's scratch ones, and the user's own state dir has no file of this window.
+  const inTmp = (/** @type {string} */ p) => !path.relative(fs.realpathSync(tmp), fs.realpathSync(p)).startsWith("..");
+  assert.ok(inTmp(dir), `state dir ${dir} inside ${tmp}`);
+  assert.equal(path.dirname(ext.exports.stateFile), dir);
+  const storage = ext.exports.viewer.context.globalStorageUri.fsPath;
+  assert.ok(!path.relative(tmp, storage).startsWith(".."), `global storage ${storage} inside ${tmp}`);
+  assert.deepEqual(vscode.extensions.all.filter((e) => !e.packageJSON.isBuiltin && e.id !== ext.id).map((e) => e.id), []);
+  const usersDir = stateDir({ ...process.env, VSCODE_PDF_MCP_DIR: "" });
+  assert.notEqual(usersDir, dir);
+  assert.ok(!fs.existsSync(path.join(usersDir, `${process.pid}.json`)), `nothing written into ${usersDir}`);
 
   // 1. *.pdf opens in our editor by default; the state file shows it with its page count.
   await vscode.commands.executeCommand("vscode.open", vscode.Uri.file(paper));
@@ -140,6 +180,7 @@ async function run() {
   await vscode.commands.executeCommand("workbench.action.closeAllEditors");
   await waitFor(() => backend.readStates(dir).find((s) => s.pid === process.pid)?.panels.length === 0, "no panels left");
   assert.throws(() => backend.viewerState({ dir }), { message: "no VS Code window with a PDF open" });
+  ran("viewer, state file, goto, reload, hook, Open in Okular");
 
   await marking(ext);
   await vscode.commands.executeCommand("workbench.action.closeAllEditors");
@@ -204,7 +245,9 @@ async function marking(ext) {
   const editCommand = process.env.VSCODE_PDF_MCP_EDIT_COMMAND;
   const mcpCommand = process.env.VPDF_PRW_MCP;
   if (!editCommand || !python) {
-    console.log("integration: marking SKIPPED: needs pdf-reader-writer-edit (VSCODE_PDF_MCP_EDIT_COMMAND or PATH) and VPDF_PYTHON");
+    skipped("marking", "needs pdf-reader-writer-edit (VSCODE_PDF_MCP_EDIT_COMMAND or PATH) and a Python with pymupdf (VPDF_PYTHON)");
+    skipped("marking UI", "no marking");
+    skipped("concurrency with pdf-reader-writer-mcp", "no marking");
     return;
   }
   console.log(`integration: marking through ${editCommand}`);
@@ -230,15 +273,19 @@ async function marking(ext) {
     const chrome = Number((process.versions.chrome || "999").split(".")[0]);
     if (found) {
       await markingUi(pdf, found.page, found.frame, client);
+      ran("marking UI");
     } else if (chrome < 130) {
       // Playwright does not reach the webview's out-of-process iframe in old Electrons
       // (VS Code 1.90 has Chromium 122): the extension and service paths are still tested.
-      console.log(`integration: marking UI SKIPPED: the webview is not reachable over CDP here (VS Code ${vscode.version}, Chromium ${chrome})`);
+      skipped("marking UI", `the webview is not reachable over CDP here (VS Code ${vscode.version}, Chromium ${chrome})`);
     } else {
       throw new Error("no webview frame for marks.pdf");
     }
-    if (client) await concurrency(ext, client);
-    else console.log("integration: concurrency SKIPPED: needs pdf-reader-writer-mcp (VPDF_PRW_MCP or PATH)");
+    if (client) {
+      await concurrency(ext, client);
+      ran("concurrency with pdf-reader-writer-mcp");
+    } else skipped("concurrency with pdf-reader-writer-mcp", "needs pdf-reader-writer-mcp (VPDF_PRW_MCP or PATH)");
+    ran("marking");
   } finally {
     await client?.close().catch(() => {});
     await browser.close().catch(() => {});
@@ -495,7 +542,8 @@ async function concurrency(ext, client) {
 /** @param {any} ext */
 async function synctex(ext) {
   if (!process.env.VPDF_LATEX) {
-    console.log("integration: SyncTeX SKIPPED: pdflatex is not installed");
+    skipped("SyncTeX", "pdflatex is not installed");
+    skipped("SyncTeX mouse steps", "no SyncTeX");
     return;
   }
   const { chromium } = require("playwright-core");
@@ -519,7 +567,7 @@ async function synctex(ext) {
     const found = await webviewFrame(browser, "/ 2");
     const chrome = Number((process.versions.chrome || "999").split(".")[0]);
     if (!found && chrome >= 130) throw new Error("no webview frame for main.pdf");
-    if (!found) console.log(`integration: SyncTeX mouse steps SKIPPED: the webview is not reachable over CDP here (Chromium ${chrome})`);
+    if (!found) skipped("SyncTeX mouse steps", `the webview is not reachable over CDP here (Chromium ${chrome})`);
     const page = found?.page;
     const f = found?.frame;
     await f?.waitForFunction(() => document.body.classList.contains("synctex"), null, { timeout: 15000 });
@@ -653,7 +701,9 @@ async function synctex(ext) {
         const e = vscode.window.activeTextEditor;
         return e && e.document.uri.fsPath === chapter && e.selection.active.line === 4;
       }, "chapters/one.tex at line 5 after the rebuild");
+      ran("SyncTeX mouse steps");
     }
+    ran("SyncTeX");
   } finally {
     await browser.close().catch(() => {});
   }
@@ -923,7 +973,7 @@ const pdfmarks = (text) => [...text.matchAll(/\\pdfmark\[([^\]]*)\]\{([^{}]*)\}\
  */
 async function sourceSync(ext) {
   const editCommand = process.env.VSCODE_PDF_MCP_EDIT_COMMAND;
-  const skip = (/** @type {string} */ why) => console.log(`integration: marks into the LaTeX source SKIPPED: ${why}`);
+  const skip = (/** @type {string} */ why) => skipped("marks into the LaTeX source", why);
   if (!editCommand || !python) return skip("needs pdf-reader-writer-edit and VPDF_PYTHON");
   if (!process.env.VPDF_LATEX) return skip("pdflatex is not installed");
   const { viewer } = ext.exports;
@@ -936,7 +986,7 @@ async function sourceSync(ext) {
   if (styDir && fs.existsSync(path.join(styDir, "pdfnotes.sty"))) {
     env = { ...process.env, TEXINPUTS: `${styDir}${path.delimiter}${process.env.TEXINPUTS || ""}` };
   } else if (!kpse("pdfnotes.sty")) {
-    return skip("pdfnotes.sty not found (VPDF_PDFNOTES_DIR, a pdf-reader-writer-mcp checkout next to this one, or kpsewhich)");
+    return skip("pdfnotes.sty not found (VPDF_PDFNOTES_DIR, the latex/ of a pdf-reader-writer-mcp checkout next to this one or of the edit service's source tree, or kpsewhich)");
   }
   if (!kpse("todonotes.sty")) return skip("todonotes is not installed");
   const { compile } = require("../helpers/latex");
@@ -1042,6 +1092,7 @@ async function sourceSync(ext) {
     await waitFor(() => doc.getText() === source() && !doc.isDirty, "(e) the editor follows");
     await delay(1000);
     assert.equal(syncs, 5, "one sync per action");
+    ran("marks into the LaTeX source");
   } finally {
     ss.hooks.request = request;
     await browser.close().catch(() => {});
