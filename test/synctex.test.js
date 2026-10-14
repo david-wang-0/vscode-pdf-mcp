@@ -494,3 +494,20 @@ test("tagsOf: a source named through a symlink finds its tags", () => {
     fs.rmSync(d0, { recursive: true, force: true });
   }
 });
+
+test("reverse: a point outside every hbox underlines a band of the vbox one line high, inside it, also from a margin above or below", () => {
+  const body = ["{1", "[1,5:0,1000000:20000000,900000,0", "h1,6:1000000,300000:5000000,200000,0", "]", "}1", "{3", "}3"];
+  const d = parseSynctex(synctexText({ body }), { dir: "/proj" });
+  const [, boxTop, , boxBottom] = d.rect(0, 1000000 - 900000, 20000000, 1000000);
+  for (const y of [8, 2, 100, -50]) {
+    const hit = d.edit(1, 200, y);
+    assert.equal(hit?.line, 5, `y=${y}`);
+    const [[l, t, r, b]] = /** @type {any} */ (hit).rects;
+    assert.ok(l < r && t < b, `y=${y}: ${hit?.rects}`);
+    assert.ok(t >= boxTop - 1e-6 && b <= boxBottom + 1e-6, `y=${y}: [${t}, ${b}] inside [${boxTop}, ${boxBottom}]`);
+    assert.ok(b - t <= 12 + 1e-6);
+  }
+  assert.equal(d.edit(2, 1, 1), null, "no such page");
+  assert.equal(d.edit(3, 1, 1), null, "an empty page");
+  assert.equal(d.textAt(2, 1, 1), null);
+});
