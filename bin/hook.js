@@ -21,6 +21,9 @@ try {
     event = null;
   }
   const out = hookOutput(event, readStates());
+  // A reader that has gone (EPIPE) is reported on the stream, not thrown: without a
+  // listener it would end the hook with exit 1.
+  process.stdout.on("error", () => {});
   if (out) process.stdout.write(out + "\n");
 } catch {
   // Never block a prompt.

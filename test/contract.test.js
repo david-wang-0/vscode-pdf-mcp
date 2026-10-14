@@ -7,7 +7,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { spawnSync } = require("node:child_process");
+const { once } = require("node:events");
+const { spawn, spawnSync } = require("node:child_process");
 const backend = require("../lib/backend");
 const { ensureSessionEnv, runtimeDir, stateDir } = require("../lib/runtime");
 const { hookOutput } = require("../lib/hook");
@@ -463,6 +464,21 @@ test("C6: the hook exits 0 on internal errors (unreadable state dir)", () => {
   const out = runHook(JSON.stringify({ cwd: r.rt }), { XDG_RUNTIME_DIR: r.rt });
   assert.equal(out.status, 0);
   assert.equal(out.stdout, "");
+});
+
+test("C6: the hook exits 0 when its reader has gone (stdout closed: EPIPE)", async () => {
+  const r = rt();
+  const proj = path.join(r.rt, "proj");
+  r.window({ focused: true, panels: [{ path: path.join(proj, "a.pdf"), active: true }] });
+  const child = spawn(process.execPath, [HOOK], { env: { PATH: process.env.PATH, XDG_RUNTIME_DIR: r.rt }, stdio: "pipe" });
+  let stderr = "";
+  child.stderr.on("data", (d) => { stderr += d; });
+  // the hook reads stdin to its end before it writes, so its stdout is closed by then
+  child.stdout.destroy();
+  child.stdin.end(JSON.stringify({ cwd: proj }));
+  const [code] = await once(child, "close");
+  assert.equal(code, 0, stderr);
+  assert.equal(stderr, "");
 });
 
 test("C6: the hook prints exactly one UserPromptSubmit JSON object, well inside a second", () => {
