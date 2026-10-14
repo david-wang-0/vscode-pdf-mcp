@@ -596,6 +596,28 @@ test("C6: a closed stdin, or a terminal on stdin, exits 0 at once and prints not
   assert.ok(Date.now() - t0 < 2000, `took ${Date.now() - t0} ms`);
 });
 
+test("C6: an unreadable stdin (a directory) exits 0 silently", () => {
+  const r = rt();
+  r.window({ focused: true, workspaceFolders: ["/"], panels: [{ path: "/a.pdf", active: true }] });
+  const out = spawnSync("sh", ["-c", 'exec "$0" "$1" < /', process.execPath, HOOK],
+    { env: { PATH: process.env.PATH, XDG_RUNTIME_DIR: r.rt }, encoding: "utf8", timeout: 5000 });
+  assert.deepEqual([out.status, out.stdout, out.stderr], [0, "", ""]);
+});
+
+test("C6: an exception anywhere inside the hook (an Error or anything else thrown) exits 0 silently", () => {
+  const r = rt();
+  const proj = path.join(r.rt, "proj");
+  r.window({ focused: true, panels: [{ path: path.join(proj, "a.pdf"), active: true }] });
+  for (const thrown of ['new Error("boom")', 'new TypeError("x is undefined")', '"a string"', "undefined"]) {
+    // break the backend before the hook loads it, as a bug in it would
+    const preload = path.join(r.rt, "break.js");
+    fs.writeFileSync(preload, `require(${JSON.stringify(path.resolve(__dirname, "../lib/backend"))}).readStates = () => { throw ${thrown}; };\n`);
+    const out = spawnSync(process.execPath, ["-r", preload, HOOK],
+      { input: JSON.stringify({ cwd: proj }), env: { PATH: process.env.PATH, XDG_RUNTIME_DIR: r.rt }, encoding: "utf8", timeout: 5000 });
+    assert.deepEqual([out.status, out.stdout, out.stderr], [0, "", ""], thrown);
+  }
+});
+
 test("C6: the hook reads only the state files, never a window's socket, so a hung window cannot slow it", async () => {
   const r = rt();
   const proj = path.join(r.rt, "proj");
