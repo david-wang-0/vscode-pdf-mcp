@@ -62,11 +62,27 @@ test("edit service: a response split over several writes is reassembled", async 
   assert.deepEqual(await s.request("__split"), { split: true });
 });
 
-test("edit service: non-JSON lines and unmatched ids are logged and skipped", async () => {
+test("edit service: blank lines are skipped; non-JSON lines, non-responses and unmatched ids are logged and skipped", async () => {
   const s = fake();
   assert.deepEqual(await s.request("__noise"), { noise: true });
-  assert.ok(s.logs.some((l) => l.includes("not JSON")), s.logs.join("\n"));
-  assert.ok(s.logs.some((l) => l.includes("unmatched")), s.logs.join("\n"));
+  assert.deepEqual(s.logs.filter((l) => /not JSON|unmatched/.test(l)), [
+    "edit service: not JSON: this is not JSON",
+    "edit service: unmatched response: null",
+    `edit service: unmatched response: {"id":"1","ok":true,"result":"an id that is not a number"}`,
+    `edit service: unmatched response: {"id":999999,"ok":true,"result":"stray"}`,
+  ]);
+  assert.deepEqual(await s.request("ping"), { version: 1 }, "still in step");
+});
+
+test("edit service: its stderr goes to the log line by line, blank lines left out", async () => {
+  const s = fake();
+  assert.deepEqual(await s.request("__stderr"), { stderr: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(s.logs.filter((l) => l.includes("warning")), ["edit service: first warning", "edit service: second warning"]);
+});
+
+test("edit service: a failure without a message is '<op> failed'", async () => {
+  await assert.rejects(fake().request("__noerror"), (e) => e instanceof EditServiceError && e.message === "__noerror failed");
 });
 
 test("edit service: the service's errors reach the caller verbatim", async () => {
@@ -100,6 +116,22 @@ test("edit service: a missing executable is reported as missing, naming pdf-read
   assert.equal(/** @type {any} */ (r).missing, true);
   assert.match(/** @type {any} */ (r).reason, /not found: install pdf-reader-writer-mcp/);
   await assert.rejects(s.request("ping"), (e) => e instanceof EditServiceUnavailable && e.missing);
+});
+
+test("edit service: an executable without the x bit is reported as missing too", async () => {
+  const plain = path.join(tmp, "not-executable");
+  fs.writeFileSync(plain, "#!/bin/sh\n", { mode: 0o644 });
+  const s = fake({ command: plain, args: [] });
+  const r = await s.probe();
+  assert.deepEqual([r.ok, /** @type {any} */ (r).missing], [false, true]);
+  assert.match(/** @type {any} */ (r).reason, /not found: install pdf-reader-writer-mcp/);
+  assert.ok(s.logs.some((l) => l.startsWith(`edit service ${plain}: `)), s.logs.join("\n"));
+});
+
+test("edit service: probe after dispose reports it, not as missing", async () => {
+  const s = fake();
+  s.dispose();
+  assert.deepEqual(await s.probe(), { ok: false, missing: false, reason: "edit service disposed" });
 });
 
 test("edit service: protocol 2 (and newer) is accepted, an older one turns marking off", async () => {

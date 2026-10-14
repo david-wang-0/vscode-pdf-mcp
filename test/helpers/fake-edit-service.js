@@ -7,9 +7,11 @@
  * PDF. The page count is the number of `/Type /Page` objects in the file.
  *
  * Test-only ops: `__crash` (exit 3 at once), `__split` (answer in three writes),
- * `__noise` (a non-JSON line and an unmatched response before the answer),
- * `__hang` (never answer), `__slow {ms}` (answer after `ms`, holding up the requests
- * behind it, as the real service handles one at a time).
+ * `__noise` (a blank line, a non-JSON line, JSON that is no response and an unmatched
+ * response before the answer), `__stderr` (log lines on stderr, one in two writes),
+ * `__noerror` (a failure without a message), `__hang` (never answer), `__slow {ms}`
+ * (answer after `ms`, holding up the requests behind it, as the real service handles one
+ * at a time).
  */
 "use strict";
 
@@ -276,8 +278,21 @@ function onLine(line) {
     setTimeout(() => process.stdout.write(s.slice(12)), 40);
     return;
   }
+  if (op === "__stderr") {
+    process.stderr.write("first warning\n\nsecond ");
+    setTimeout(() => {
+      process.stderr.write("warning\n");
+      write({ id, ok: true, result: { stderr: true } });
+    }, 20);
+    return;
+  }
+  if (op === "__noerror") {
+    write({ id, ok: false });
+    return;
+  }
   if (op === "__noise") {
-    process.stdout.write("this is not JSON\n");
+    process.stdout.write("\n   \nthis is not JSON\nnull\n");
+    write({ id: String(id), ok: true, result: "an id that is not a number" });
     write({ id: 999999, ok: true, result: "stray" });
     write({ id, ok: true, result: { noise: true } });
     return;
