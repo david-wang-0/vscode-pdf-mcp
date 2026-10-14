@@ -237,13 +237,18 @@ function snippet(raw, stretch, max = 80) {
   if (em && em[1] <= em[0]) em = null;
   if (text.length <= max) return em ? { text, em } : { text };
   if (!em || em[1] <= max - 1) return { text: `${text.slice(0, max - 1).trimEnd()}…`, ...(em ? { em } : {}) };
-  // the word is further in: a window around it, a third of the room before it
-  const from = Math.max(0, Math.min(em[0] - Math.floor((max - (em[1] - em[0])) / 3), text.length - (max - 1)));
-  const to = Math.min(text.length, from + max - 2);
+  // the word is further in: a window around it, a third of the room before it; one that
+  // reaches the end of the line ends there, with "…" in front only
+  let from = Math.max(0, em[0] - Math.floor((max - (em[1] - em[0])) / 3));
+  let to = from + (from > 0 ? max - 2 : max - 1);
+  if (to >= text.length) {
+    to = text.length;
+    from = Math.max(0, to - (max - 1));
+  }
   const head = from > 0 ? "…" : "";
   const tail = to < text.length ? "…" : "";
   const body = text.slice(from, to);
-  return { text: head + body + tail, em: [em[0] - from + head.length, Math.min(em[1], to) - from + head.length] };
+  return { text: head + body + tail, em: [Math.max(em[0], from) - from + head.length, Math.min(em[1], to) - from + head.length] };
 }
 
 module.exports = { SynctexStore, pdfCandidatesForTex, sourceLine, sourceLines, snippet };

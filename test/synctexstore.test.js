@@ -208,3 +208,18 @@ test("store: refreshes asked for while a parse runs wait for it, and the file is
   assert.equal(a.edit(1, 120, 90)?.line, 6);
   assert.equal(logs.filter((l) => l.startsWith("SyncTeX: parsed")).length, 1, logs.join("\n"));
 });
+
+test("snippet: a word at the end of a long line shows whole, the window ending there; a stretch wider than the window is marked within it", () => {
+  for (const n of [78, 79, 80, 81, 150]) {
+    const long = `${"a".repeat(n)} last`;
+    const l = snippet(long, [long.length - 4, long.length]);
+    assert.ok(l.text.startsWith("…") && l.text.endsWith(" last") && l.text.length <= 80, `${n}: ${l.text}`);
+    assert.equal(l.text.slice(...(/** @type {[number, number]} */ (l.em))), "last", `${n}`);
+  }
+  const wide = snippet("x".repeat(200), [50, 190]);
+  assert.ok(wide.em && wide.em[0] >= 1 && wide.em[1] <= wide.text.length - 1, JSON.stringify(wide.em));
+  assert.equal(wide.text.length, 80);
+  // a stretch of leading whitespace marks nothing; inner whitespace is one space
+  assert.deepEqual(snippet("   a", [0, 2]), { text: "a" });
+  assert.deepEqual(snippet("a    b", [1, 4]), { text: "a b", em: [1, 2] });
+});
