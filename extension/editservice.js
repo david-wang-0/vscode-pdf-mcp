@@ -63,7 +63,14 @@ class EditService {
     if (this.disposed) throw new EditServiceUnavailable("edit service disposed");
     this.starts++;
     this.buf = "";
-    const child = spawn(this.command, this.args, { stdio: ["pipe", "pipe", "pipe"], env: this.env });
+    /** @type {import("node:child_process").ChildProcessWithoutNullStreams} */
+    let child;
+    try {
+      child = spawn(this.command, this.args, { stdio: ["pipe", "pipe", "pipe"], env: this.env });
+    } catch (e) {
+      // some failures (ENOTDIR, EINVAL, ...) are thrown at once, not reported as "error"
+      throw this.cannotStart(/** @type {NodeJS.ErrnoException} */ (e));
+    }
     this.child = child;
     // Requests wait for the process to exist: writing to a process that failed to start
     // raises SIGPIPE in the extension host.
@@ -88,12 +95,7 @@ class EditService {
     child.on("error", (e) => {
       held = null;
       this.send = () => {};
-      const code = /** @type {NodeJS.ErrnoException} */ (e).code;
-      const missing = code === "ENOENT" || code === "EACCES";
-      this.log(`edit service ${this.command}: ${e.message}`);
-      onGone(new EditServiceUnavailable(missing
-        ? `${this.command} not found: install pdf-reader-writer-mcp (it provides pdf-reader-writer-edit) or set vscodePdfMcp.editCommand`
-        : `cannot start ${this.command}: ${e.message}`, { missing }));
+      onGone(this.cannotStart(e));
     });
     child.on("exit", (code, signal) => {
       this.log(`edit service exited (${signal || `code ${code}`})`);
@@ -116,6 +118,18 @@ class EditService {
       }
     });
     return child;
+  }
+
+  /**
+   * The error for a process that could not be started (logged).
+   * @param {NodeJS.ErrnoException} e
+   */
+  cannotStart(e) {
+    const missing = e.code === "ENOENT" || e.code === "EACCES";
+    this.log(`edit service ${this.command}: ${e.message}`);
+    return new EditServiceUnavailable(missing
+      ? `${this.command} not found: install pdf-reader-writer-mcp (it provides pdf-reader-writer-edit) or set vscodePdfMcp.editCommand`
+      : `cannot start ${this.command}: ${e.message}`, { missing });
   }
 
   /**

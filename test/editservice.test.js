@@ -128,6 +128,16 @@ test("edit service: an executable without the x bit is reported as missing too",
   assert.ok(s.logs.some((l) => l.startsWith(`edit service ${plain}: `)), s.logs.join("\n"));
 });
 
+test("edit service: a command that cannot start for another reason (ENOTDIR, thrown at once) is 'cannot start', not missing", async () => {
+  const odd = path.join(pdf, "pdf-reader-writer-edit"); // a file used as a directory
+  const s = fake({ command: odd, args: [] });
+  const r = await s.probe();
+  assert.deepEqual([r.ok, /** @type {any} */ (r).missing], [false, false]);
+  assert.equal(/** @type {any} */ (r).reason, `cannot start ${odd}: spawn ENOTDIR`);
+  await assert.rejects(s.request("ping"), (e) => e instanceof EditServiceUnavailable && !e.missing);
+  assert.ok(s.logs.some((l) => l.startsWith(`edit service ${odd}: `)), s.logs.join("\n"));
+});
+
 test("edit service: probe after dispose reports it, not as missing", async () => {
   const s = fake();
   s.dispose();
