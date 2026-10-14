@@ -511,3 +511,24 @@ test("reverse: a point outside every hbox underlines a band of the vbox one line
   assert.equal(d.edit(3, 1, 1), null, "an empty page");
   assert.equal(d.textAt(2, 1, 1), null);
 });
+
+test("reverse: a right-to-left line (negative widths): each part of it maps to its own source line", () => {
+  const body = ["{1", "[1,1:0,1000000:20000000,900000,0",
+    "(1,3:14736286,6000000:-10000000,500000,100000", // from 224 bp leftwards to 72 bp
+    "x1,3:13000000,6000000", "k1,3:12700000,6000000:-300000", "g1,4:11000000,6000000", "x1,4:10000000,6000000",
+    "$1,4:9000000,6000000", "x1,4:5000000,6000000", ")", "]", "}1"];
+  const d = parseSynctex(synctexText({ body }), { dir: "/proj" });
+  for (const [x, line] of [[210, 3], [190, 3], [160, 4], [100, 4], [80, 4]]) assert.equal(d.edit(1, x, 90)?.line, line, `x=${x}`);
+  const v = d.view("/proj/a.tex", 4);
+  assert.equal(v?.page, 1);
+  for (const [l, , r] of /** @type {any} */ (v).rects) assert.ok(l >= 72 - 1e-6 && r <= 224.1 && l < r, `${v?.rects}`);
+});
+
+test("selection: parts and rects that are not usable are skipped, not errors", () => {
+  const d = parseSynctex(synctexText(), { dir: "/proj" });
+  const good = [100, 85, 140, 92];
+  const parts = /** @type {any} */ ([null, { page: "1", rects: [good] }, { page: 1, rects: "x" }, { page: 1, rects: [
+    null, [1, 2, 3], [100, 85, NaN, 92], [140, 85, 100, 92], [100, 92, 140, 85], good] }, { page: 7, rects: [good] }]);
+  assert.deepEqual(d.sourceOfSelection(parts), [{ file: "/proj/a.tex", lines: [3, 3] }]);
+  assert.deepEqual(d.sourceOfSelection(/** @type {any} */ (null)), []);
+});
