@@ -400,3 +400,97 @@ test("word level: an inverse search from each word of page 2 lands on that word 
   assert.equal(got.get("several#0")?.line, 40);
   assert.equal(got.get("efficient#0")?.column, l36.indexOf("efficient"));
 });
+
+// ---- hand-written SyncTeX files (no TeX needed) ---------------------------------------
+
+/**
+ * A one-page SyncTeX file whose only text line (an hbox with two glyphs and a kern) comes
+ * from `line` of a.tex, with preamble lines `pre`, content lines `body` and post scriptum
+ * lines `post`.
+ * @param {{pre?: string[], body?: string[], post?: string[], line?: number}} [o]
+ */
+function synctexText({ pre = ["Magnification:1000", "Unit:1", "X Offset:0", "Y Offset:0"], body, post = [], line = 3 } = {}) {
+  const content = body || ["{1", "[1,1:0,1000000:20000000,900000,0", `(1,${line}:4736286,6000000:10000000,500000,100000`,
+    `x1,${line}:6000000,6000000`, `k1,${line}:6300000,6000000:300000`, `x1,${line}:9000000,6000000`, ")", "]", "}1"];
+  return ["SyncTeX Version:1", "Input:1:./a.tex", "Output:pdf", ...pre, "Content:", ...content,
+    "Postamble:", "Count:5", "Post scriptum:", ...post, ""].join("\n");
+}
+
+test("parse: the post scriptum's Magnification (a factor) and X/Y Offset (with TeX units) scale and move every box", () => {
+  const plain = parseSynctex(synctexText(), { dir: "/proj" });
+  const hit = plain.edit(1, 120, 90);
+  assert.equal(hit?.line, 3);
+  const [l, t, r, b] = /** @type {any} */ (hit).rects[0];
+  const moved = parseSynctex(synctexText({ post: ["Magnification:2", "X Offset:1in", "Y Offset:12.7mm"] }), { dir: "/proj" });
+  assert.ok(Math.abs(moved.xOffset - 72) < 1e-9 && Math.abs(moved.yOffset - 36) < 1e-9, `${moved.xOffset} ${moved.yOffset}`);
+  assert.ok(Math.abs(moved.unit - 2 * plain.unit) < 1e-15);
+  const got = moved.edit(1, 2 * 120 + 72, 2 * 90 + 36);
+  assert.equal(got?.line, 3);
+  const want = [2 * l + 72, 2 * t + 36, 2 * r + 72, 2 * b + 36];
+  /** @type {any} */ (got).rects[0].forEach((/** @type {number} */ x, /** @type {number} */ k) => assert.ok(Math.abs(x - want[k]) < 0.01, `${got?.rects[0]} vs ${want}`));
+  for (const [dim, bp] of /** @type {[string, number][]} */ ([["72.27pt", 72], ["72bp", 72], ["2.54cm", 72], ["6pc", 72 * 72 / 72.27], ["65536sp", 72 / 72.27], ["100", 100 / 65781.76]])) {
+    const d = parseSynctex(synctexText({ post: [`X Offset:${dim}`] }), { dir: "/proj" });
+    assert.ok(Math.abs(d.xOffset - bp) < 1e-6, `${dim}: ${d.xOffset} != ${bp}`);
+  }
+});
+
+test("parse: defaults for a missing or zero Unit and Magnification (8192 sp, 1000) and a 1in origin; an unreadable offset keeps the preamble's", () => {
+  const d = parseSynctex(synctexText({ pre: ["Unit:0", "Magnification:0"], post: ["X Offset:junk", "Y Offset:"] }), { dir: "/proj" });
+  assert.ok(Math.abs(d.unit - 8192 / 65781.76) < 1e-12);
+  assert.ok(Math.abs(d.xOffset - 578 * 8192 / 65781.76) < 1e-9 && Math.abs(d.yOffset - d.xOffset) < 1e-9, `${d.xOffset} ${d.yOffset}`);
+  const mag = parseSynctex(synctexText({ pre: ["Unit:1", "Magnification:2000", "X Offset:0", "Y Offset:0"] }), { dir: "/proj" });
+  assert.ok(Math.abs(mag.unit - 2 / 65781.76) < 1e-15);
+});
+
+test("parse: junk is skipped (malformed records, closers without an opener, unknown records, forms, a page never closed), the rest still maps", () => {
+  const body = [
+    "this line means nothing",
+    "x1,9:1,1", // a record before any page
+    "{1",
+    "]", ")", // closers with nothing open
+    "[1,1:0,1000000:20000000,900000,0",
+    "(garbage",
+    "(1,3:4736286,6000000:10000000,500000,100000",
+    "x1,3:6000000,6000000",
+    "xbad", "k1,3", "g1,x:1,2", "$1,3", "r:1,1", "v1:1", "hjunk",
+    "!12345", "%comment", "?unknown",
+    "<1", "x1,77:6000000,6000000", "<2", ">", ">", // a form, skipped (nested too)
+    "k1,3:6300000,6000000:300000",
+    "x1,3:9000000,=",
+    ")",
+    "]",
+    "}1",
+    "{2", "[1,40:0,1000000:20000000,900000,0", // page 2 is never closed
+  ];
+  const d = parseSynctex(synctexText({ body }), { dir: "/proj" });
+  assert.deepEqual(d.pages, [1]);
+  assert.equal(d.edit(1, 120, 90)?.line, 3);
+  assert.notEqual(d.maxLine.get(1), 77, "nothing from the form");
+  assert.equal(d.view("/proj/a.tex", 3)?.page, 1);
+  assert.equal(d.view("/proj/a.tex", 77)?.line, 3, "line 77 (only in the form) is unknown: the closest line is shown");
+});
+
+test("parse: inputs listed after the content are read too; bad Input lines are skipped", () => {
+  const text = synctexText({ post: ["Input:2:/abs/b.tex", "Input:x:/abs/c.tex", "Input:3:", "Input:nocolon"] });
+  const d = parseSynctex(text, { dir: "/proj" });
+  assert.deepEqual(d.files, ["/proj/a.tex", "/abs/b.tex"]);
+  assert.equal(d.fileOf(9), "");
+  assert.equal(d.covers("/abs/b.tex"), false, "listed but without records");
+  assert.equal(d.covers("/proj/a.tex"), true);
+});
+
+test("tagsOf: a source named through a symlink finds its tags", () => {
+  const d0 = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "vpdf-stxlink-")));
+  try {
+    fs.mkdirSync(path.join(d0, "real"));
+    fs.writeFileSync(path.join(d0, "real", "a.tex"), "x\n");
+    fs.symlinkSync(path.join(d0, "real"), path.join(d0, "link"));
+    const d = parseSynctex(synctexText(), { dir: path.join(d0, "real") });
+    assert.deepEqual(d.tagsOf(path.join(d0, "real", "a.tex")), [1]);
+    assert.deepEqual(d.tagsOf(path.join(d0, "link", "a.tex")), [1]);
+    assert.deepEqual(d.tagsOf(path.join(d0, "link", "b.tex")), []);
+    assert.equal(d.covers(path.join(d0, "link", "a.tex")), true);
+  } finally {
+    fs.rmSync(d0, { recursive: true, force: true });
+  }
+});
