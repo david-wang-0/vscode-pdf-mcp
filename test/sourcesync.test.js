@@ -258,6 +258,81 @@ test("source sync: a report without a source or without changes shows nothing", 
   assert.deepEqual(changedFiles(calls.synced[0].r), ["sec/intro.tex"]);
 });
 
+test("source sync: a report with only some lists, or without a source and a reason, is logged with zeros or 'no source'", async () => {
+  const { sync, world, calls } = setup();
+  world.respond = async () => ({ source: "paper.tex", inserted: [{ id: "a1", file: "paper.tex", line: 3, macro: "pdfmark" }] });
+  sync.schedule(PDF);
+  await sync.settled(PDF);
+  assert.ok(calls.log.includes(`sync ${PDF} -> paper.tex: 1 inserted, 0 updated, 0 removed, 0 as notes, 0 skipped`), calls.log.join("\n"));
+  assert.deepEqual(changedFiles(calls.synced[0].r), ["paper.tex"]);
+  world.respond = async () => ({ source: null });
+  sync.schedule(PDF);
+  await sync.settled(PDF);
+  assert.equal(calls.log.at(-1), `sync ${PDF}: no source`);
+  assert.equal(calls.synced.length, 1);
+});
+
+test("source sync: something thrown that is not an Error is reported as its text", async () => {
+  const { sync, world, calls } = setup();
+  world.respond = async () => {
+    throw "the service went away"; // eslint-disable-line no-throw-literal
+  };
+  sync.schedule(PDF);
+  await sync.settled(PDF);
+  assert.deepEqual(calls.errors, [`${PDF}: the service went away`]);
+});
+
+test("source sync: switched off while waiting in the PDF's write queue, nothing is asked", async () => {
+  const { sync, world, calls } = setup({
+    serial: async (_pdf, fn) => {
+      world.enabled = false; // e.g. the setting changed while an earlier write ran
+      return fn();
+    },
+  });
+  sync.schedule(PDF);
+  await sync.settled(PDF);
+  assert.deepEqual(calls.requests, []);
+  assert.deepEqual([calls.synced, calls.errors], [[], []]);
+});
+
+test("source sync: isBusy while scheduled or running, not before or after", async () => {
+  const { sync, world } = setup();
+  /** @type {() => void} */
+  let release = () => {};
+  world.respond = () => new Promise((resolve) => {
+    release = () => resolve(report());
+  });
+  assert.equal(sync.isBusy(PDF), false);
+  sync.schedule(PDF);
+  assert.equal(sync.isBusy(PDF), true, "scheduled");
+  await delay(DEBOUNCE * 3);
+  assert.equal(sync.isBusy(PDF), true, "running");
+  release();
+  await sync.settled(PDF);
+  assert.equal(sync.isBusy(PDF), false);
+});
+
+test("source sync: with only the required hooks, it looks for the SyncTeX file itself and is always on", async () => {
+  const pdf = path.join(tmp, "plain.pdf");
+  /** @type {string[]} */
+  const asked = [];
+  const sync = new SourceSync({
+    request: async (p) => {
+      asked.push(p);
+      return report();
+    },
+    version: async () => 2,
+    dirtySources: () => [],
+  });
+  await sync.fire(pdf);
+  assert.deepEqual(asked, [], "no SyncTeX file: no sync");
+  fs.writeFileSync(path.join(tmp, "plain.synctex.gz"), "x");
+  await sync.fire(pdf);
+  assert.deepEqual(asked, [pdf]);
+  assert.equal(sync.debounceMs, 300);
+  sync.dispose();
+});
+
 test("source sync: dispose stops what is scheduled", async () => {
   const { sync, calls } = setup();
   sync.schedule(PDF);

@@ -160,3 +160,51 @@ test("snippet: the hover tip's line with the matched word marked, cut around it 
   assert.deepEqual(sourceLines(f), ["one", "two", ""]);
   assert.deepEqual(sourceLines(path.join(d, "nope.tex")), []);
 });
+
+test("store: one watch per tab: the data stays until the last tab unwatches; unknown PDFs are ignored", async () => {
+  const d = tmp();
+  const pdf = path.join(d, "a.pdf");
+  fs.writeFileSync(path.join(d, "a.synctex.gz"), zlib.gzipSync(synctexText(3)));
+  /** @type {string[]} */
+  const logs = [];
+  const s = new SynctexStore({ debounceMs: 20, log: (m) => logs.push(m) });
+  cleanups.push(() => s.dispose());
+  s.watch(pdf);
+  s.watch(pdf);
+  await s.refresh(pdf);
+  assert.equal(logs.filter((l) => l.startsWith("SyncTeX: parsed")).length, 1, "parsed once for two tabs");
+  s.unwatch(pdf);
+  assert.equal(s.peek(pdf)?.edit(1, 120, 90)?.line, 3, "still watched by the other tab");
+  s.unwatch(pdf);
+  assert.equal(s.peek(pdf), null);
+  s.unwatch(path.join(d, "never-watched.pdf"));
+  assert.equal(s.entries.size, 0);
+});
+
+test("store: a PDF whose directory cannot be watched is logged, and loads without a watch", async () => {
+  const d = tmp();
+  const pdf = path.join(d, "gone", "a.pdf");
+  /** @type {string[]} */
+  const logs = [];
+  const s = new SynctexStore({ log: (m) => logs.push(m) });
+  cleanups.push(() => s.dispose());
+  s.watch(pdf);
+  assert.ok(logs.some((l) => l.startsWith(`cannot watch ${path.dirname(pdf)} for SyncTeX: `)), logs.join("\n"));
+  assert.equal(await s.refresh(pdf), null);
+  s.dispose();
+  assert.equal(s.entries.size, 0);
+});
+
+test("store: refreshes asked for while a parse runs wait for it, and the file is parsed once", async () => {
+  const d = tmp();
+  const pdf = path.join(d, "a.pdf");
+  fs.writeFileSync(path.join(d, "a.synctex.gz"), zlib.gzipSync(synctexText(6)));
+  /** @type {string[]} */
+  const logs = [];
+  const s = new SynctexStore({ log: (m) => logs.push(m) });
+  cleanups.push(() => s.dispose());
+  const [a, b, c] = await Promise.all([s.refresh(pdf), s.refresh(pdf), s.get(pdf)]);
+  assert.ok(a && a === b && b === c);
+  assert.equal(a.edit(1, 120, 90)?.line, 6);
+  assert.equal(logs.filter((l) => l.startsWith("SyncTeX: parsed")).length, 1, logs.join("\n"));
+});
