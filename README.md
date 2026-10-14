@@ -27,10 +27,14 @@ Three parts, one npm package:
 [`CONTRACT.md`](CONTRACT.md) is the viewer-state contract this repository shares with
 [okular-mcp](https://github.com/david-wang-0/okular-mcp): the same tools, entries, error
 messages and hook output, so an agent, a hook or a rule written against one works with the
-other. The one part of the contract that only this viewer fills in is SyncTeX: a
-selection's `tex` source lines (C2) and the hook's `Source:` lines (C7); Okular reports no
-selection position, so okular-mcp never sends them. Neither server reads or writes PDF
-content. That is **pdf-reader-writer-mcp**: it
+other. Both fill in SyncTeX: a selection's `tex` source lines (C2) and the hook's
+`Source:` lines (C7). Okular reports no selection position, so okular-mcp looks for the
+selected words in the text of the current page and the pages next to it, and maps them
+with `synctex edit` only when they occur there exactly once; its hook adds the selection
+only when it finds the words, since the system primary selection may come from any
+window. This viewer knows where the selection is, so it always sends both. Both also
+have a command for LaTeX tools (`vscode-pdf-mcp-open`, `okular-mcp-open`) with the same
+arguments. Neither server reads or writes PDF content. That is **pdf-reader-writer-mcp**: it
 reads page text, links and annotations and writes highlights and notes into the file with
 PyMuPDF (incremental saves), taking the `path` and `page` these servers report. The VS Code
 viewer watches the file and re-renders when it changes, keeping your page, scroll position

@@ -45,13 +45,17 @@ attributed to a document. `text` is `""` when nothing is selected (not an error)
 - `source="primary"`, VS Code: the text selected in the PDF viewer, with the document and
   the page the selection starts on. Never the system primary selection.
 - `source="primary"`, Okular: the system primary selection (`wl-paste --primary`,
-  else `xclip`/`xsel`), attributed to the active entry's path and page.
+  else `xclip`/`xsel`), attributed to the active entry's path; `page` is the page among
+  the current page and the pages next to it (the current page first, then the next, then
+  the previous one) on which the selected words are found in the page's text, else the
+  current page.
 - `source="clipboard"`: the system clipboard, never attributed (no `viewer`/`path`/`page`).
 - `tex` (optional): when the selection is attributed and the viewer can map it to LaTeX
   source through SyncTeX, a list of `{"file": "<absolute .tex path>", "lines": [first,
   last]}`, one entry per source file, in document order. Absent otherwise. (The VS Code
-  viewer supplies it for PDFs with a `.synctex.gz`/`.synctex` next to them; Okular never
-  does, because it reports no selection position.)
+  viewer supplies it for PDFs with a `.synctex.gz`/`.synctex` next to them; Okular
+  supplies it when the selected words are found exactly once on that page and
+  `synctex edit` maps them, for PDFs with a `.synctex.gz`/`.synctex` next to them.)
 - Any other `source` raises a tool error `source must be 'primary' or 'clipboard'`.
 
 **C3. `goto(page, path=None)`** shows `page` of `path` (default: the active entry's
@@ -108,8 +112,9 @@ Source: <file>:<first>-<last>
 it, else absolute).
 
 The selected text is cut at 2000 characters, with ` […]` appended when cut. The Okular
-hook omits the selection: the system primary selection cannot be tied to Okular (it may
-come from the terminal the user is typing in).
+hook includes the selection only when its words are found on the active document's
+current page or a page next to it, because the system primary selection is otherwise not
+tied to Okular (it may come from the terminal the user is typing in).
 
 **C8.** The hook prints something only when there is an active entry (VS Code: one that is
 currently its window's active editor, not the most-recent fallback of the Terms) and it
