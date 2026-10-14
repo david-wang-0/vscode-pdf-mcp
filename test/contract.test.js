@@ -7,11 +7,12 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const net = require("node:net");
 const { once } = require("node:events");
 const { spawn, spawnSync } = require("node:child_process");
 const backend = require("../lib/backend");
 const { ensureSessionEnv, runtimeDir, stateDir } = require("../lib/runtime");
-const { hookOutput } = require("../lib/hook");
+const { hookOutput, relativeToCwd, within } = require("../lib/hook");
 const ipc = require("../extension/ipc");
 const { deadPid, livePid, killLive, makeRuntime, makeStubs } = require("./helpers/fixtures");
 
@@ -223,6 +224,39 @@ test("C2: an empty clipboard is \"\", other tool failures are errors", () => {
     { message: "no clipboard tool found: install wl-clipboard (Wayland) or xclip/xsel (X11)" });
 });
 
+test("C2: each tool's nothing-selected message is \"\", whatever it printed on stdout", () => {
+  for (const stderr of ["Nothing is copied", "Error: No selection", "xclip: no selection\n", "Error: target STRING not available, no selection"]) {
+    const s = makeStubs(["xclip"], { rc: 1, stderr, stdout: "junk" });
+    cleanups.push(s.cleanup);
+    assert.equal(backend.readSystemSelection("clipboard", { PATH: s.bin, XDG_RUNTIME_DIR: "/nonexistent" }), "", stderr);
+  }
+});
+
+test("C2: the clipboard tool's output is returned verbatim (whitespace and newlines kept)", () => {
+  const s = makeStubs(["xclip"], { stdout: "  two\nlines \n" });
+  cleanups.push(s.cleanup);
+  assert.equal(backend.readSystemSelection("clipboard", { PATH: s.bin, XDG_RUNTIME_DIR: "/nonexistent" }), "  two\nlines \n");
+});
+
+test("C2: a clipboard tool that hangs is an error '<tool> timed out', after 5 s by default", () => {
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "vpdf-bin-"));
+  cleanups.push(() => fs.rmSync(bin, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(bin, "xclip"), "#!/bin/sh\nexec sleep 10\n", { mode: 0o755 });
+  const t0 = Date.now();
+  assert.throws(() => backend.readSystemSelection("clipboard", { PATH: `${bin}:/usr/bin:/bin`, XDG_RUNTIME_DIR: "/nonexistent" }, { timeoutMs: 300 }),
+    { message: "xclip timed out" });
+  assert.ok(Date.now() - t0 < 3000);
+  assert.equal(backend.SELECTION_TIMEOUT_MS, 5000);
+});
+
+test("C2: a clipboard tool that cannot be started is an error naming it", () => {
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "vpdf-bin-"));
+  cleanups.push(() => fs.rmSync(bin, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(bin, "xsel"), "#!/nonexistent/interpreter\n", { mode: 0o755 });
+  assert.throws(() => backend.readSystemSelection("primary", { PATH: bin, XDG_RUNTIME_DIR: "/nonexistent" }),
+    (/** @type {any} */ e) => e instanceof backend.ViewerError && e.message.startsWith("xsel -o --primary failed: "));
+});
+
 test("C2: any other source raises 'source must be 'primary' or 'clipboard'' before running anything", () => {
   const r = rt();
   const s = makeStubs(["wl-paste", "xclip", "xsel"]);
@@ -317,6 +351,63 @@ test("C3: a path that does not exist raises 'no such file: <path>'", async () =>
   r.window({ focused: true, panels: [{ path: "/x.pdf", active: true }] });
   const missing = path.join(os.tmpdir(), "vpdf-definitely-missing", "paper.pdf");
   await assert.rejects(backend.goto(1, missing, { dir: r.dir }), { message: `no such file: ${missing}` });
+});
+
+test("C3: 'no such file' is raised before any window is asked, also for a directory", async () => {
+  const r = rt();
+  const file = pdfFile();
+  const w = r.window({ focused: true, panels: [{ path: file, active: true }] });
+  const requests = await fakeExtension(w.socket);
+  const missing = path.join(path.dirname(file), "gone.pdf");
+  await assert.rejects(backend.goto(1, missing, { dir: r.dir }), { message: `no such file: ${missing}` });
+  const folder = path.dirname(file);
+  await assert.rejects(backend.goto(1, folder, { dir: r.dir }), { message: `no such file: ${folder}` });
+  assert.deepEqual(requests, []);
+});
+
+test("C3: a relative path is taken from the current directory and matches the open document", async (t) => {
+  const r = rt();
+  const file = pdfFile();
+  const other = livePid();
+  const focused = r.window({ focused: true, focusedAt: 50, panels: [{ path: "/elsewhere.pdf", active: true }] });
+  const owner = r.window({ pid: other, focusedAt: 10, panels: [{ path: file, pages: 3 }] });
+  const toFocused = await fakeExtension(focused.socket);
+  const toOwner = await fakeExtension(owner.socket);
+  const cwd = process.cwd();
+  process.chdir(path.dirname(file));
+  t.after(() => process.chdir(cwd));
+  await assert.rejects(backend.goto(4, path.basename(file), { dir: r.dir }), { message: "page 4 outside 1-3" });
+  await backend.goto(2, `./${path.basename(file)}`, { dir: r.dir });
+  assert.deepEqual(toOwner, [{ op: "goto", path: file, page: 2 }]);
+  assert.deepEqual(toFocused, []);
+});
+
+test("C3: a page that is not an integer is refused before any window is asked", async () => {
+  const r = rt();
+  const file = pdfFile();
+  const w = r.window({ focused: true, panels: [{ path: file, active: true }] });
+  const requests = await fakeExtension(w.socket);
+  for (const page of [1.5, NaN, "2"]) {
+    await assert.rejects(backend.goto(/** @type {any} */ (page), file, { dir: r.dir }), { message: `page must be an integer, got ${page}` });
+  }
+  assert.deepEqual(requests, []);
+});
+
+test("C3: a window that answers with nonsense or hangs up is an error, not a hang", async () => {
+  const r = rt();
+  const file = pdfFile();
+  const w = r.window({ focused: true, panels: [{ path: file, active: true }] });
+  const raw = net.createServer((c) => {
+    c.once("data", () => (fs.existsSync(path.join(r.rt, "hangup")) ? c.end() : c.end("not json\n")));
+  });
+  await new Promise((resolve) => raw.listen(w.socket, () => resolve(undefined)));
+  cleanups.push(() => raw.close());
+  await assert.rejects(backend.goto(1, null, { dir: r.dir }), { message: "bad response from the VS Code extension" });
+  fs.writeFileSync(path.join(r.rt, "hangup"), "");
+  await assert.rejects(backend.goto(1, null, { dir: r.dir }), { message: "the VS Code extension closed the connection without answering" });
+  const silent = rt();
+  const gone = silent.window({ focused: true, panels: [{ path: file, active: true }] });
+  await assert.rejects(backend.goto(1, null, { dir: silent.dir }), { message: new RegExp(`^cannot reach VS Code at ${gone.socket.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: `) });
 });
 
 test("C3: without a path and nothing open, goto raises C1's message", async () => {
@@ -466,6 +557,17 @@ test("C6: the hook exits 0 on internal errors (unreadable state dir)", () => {
   assert.equal(out.stdout, "");
 });
 
+test("C6: the hook exits 0 silently on events without a usable cwd (empty, null, relative, cut-off JSON)", () => {
+  const r = rt();
+  const proj = path.join(r.rt, "proj");
+  r.window({ focused: true, workspaceFolders: [proj], panels: [{ path: path.join(proj, "a.pdf"), active: true }] });
+  assert.notEqual(runHook(JSON.stringify({ cwd: proj }), { XDG_RUNTIME_DIR: r.rt }).stdout, "", "control: a good event prints");
+  for (const input of ['{"cwd": ""}', '{"cwd": null}', '{"cwd": "proj"}', `{"cwd": ${JSON.stringify(proj)}`, `{"cwd": [${JSON.stringify(proj)}]}`]) {
+    const out = runHook(input, { XDG_RUNTIME_DIR: r.rt, PWD: r.rt });
+    assert.deepEqual([out.status, out.stdout, out.stderr], [0, "", ""], input);
+  }
+});
+
 test("C6: the hook exits 0 when its reader has gone (stdout closed: EPIPE)", async () => {
   const r = rt();
   const proj = path.join(r.rt, "proj");
@@ -479,6 +581,40 @@ test("C6: the hook exits 0 when its reader has gone (stdout closed: EPIPE)", asy
   const [code] = await once(child, "close");
   assert.equal(code, 0, stderr);
   assert.equal(stderr, "");
+});
+
+test("C6: a closed stdin, or a terminal on stdin, exits 0 at once and prints nothing", { skip: !backend.which("script", process.env) && "needs script(1)" }, () => {
+  const r = rt();
+  r.window({ focused: true, workspaceFolders: ["/"], panels: [{ path: "/a.pdf", active: true }] });
+  const env = { PATH: process.env.PATH, XDG_RUNTIME_DIR: r.rt };
+  const closed = spawnSync("sh", ["-c", 'exec "$0" "$1" <&-', process.execPath, HOOK], { env, encoding: "utf8", timeout: 5000 });
+  assert.deepEqual([closed.status, closed.stdout, closed.stderr], [0, "", ""]);
+  // under script(1) stdin is a terminal: the hook must not wait for input from it
+  const t0 = Date.now();
+  const tty = spawnSync("script", ["-qec", `'${process.execPath}' '${HOOK}'`, "/dev/null"], { env, input: "", encoding: "utf8", timeout: 5000 });
+  assert.deepEqual([tty.status, tty.stdout, tty.error], [0, "", undefined]);
+  assert.ok(Date.now() - t0 < 2000, `took ${Date.now() - t0} ms`);
+});
+
+test("C6: the hook reads only the state files, never a window's socket, so a hung window cannot slow it", async () => {
+  const r = rt();
+  const proj = path.join(r.rt, "proj");
+  const w = r.window({ focused: true, panels: [{ path: path.join(proj, "a.pdf"), active: true }] });
+  let connections = 0;
+  const server = net.createServer(() => { connections++; }); // accepts, never answers
+  await new Promise((resolve) => server.listen(w.socket, () => resolve(undefined)));
+  cleanups.push(() => server.close());
+  const input = JSON.stringify({ cwd: proj });
+  const child = spawn(process.execPath, [HOOK], { env: { PATH: process.env.PATH, XDG_RUNTIME_DIR: r.rt } });
+  let stdout = "";
+  child.stdout.on("data", (d) => { stdout += d; });
+  const t0 = Date.now();
+  child.stdin.end(input);
+  const [code] = await once(child, "close");
+  assert.equal(code, 0);
+  assert.ok(Date.now() - t0 < 1000, `took ${Date.now() - t0} ms`);
+  assert.match(stdout, /The user is reading .*a\.pdf in VS Code/);
+  assert.equal(connections, 0);
 });
 
 test("C6: the hook prints exactly one UserPromptSubmit JSON object, well inside a second", () => {
@@ -569,6 +705,27 @@ test("C7: the hook binary prints the Source lines", () => {
   assert.match(JSON.parse(out.stdout).hookSpecificOutput.additionalContext, /\nSelected text \(page 1\):\nw\nSource: main\.tex:5-6$/);
 });
 
+test("C7: Source paths relative to cwd: normalised, never for a sibling with a common prefix", () => {
+  for (const [file, cwd, expected] of [
+    ["/p/sec/a.tex", "/p", "sec/a.tex"],
+    ["/p/a.tex", "/p/", "a.tex"],
+    ["/p/./sec/../a.tex", "/p", "a.tex"],
+    ["/q/a.tex", "/p", "/q/a.tex"],
+    ["/pq/a.tex", "/p", "/pq/a.tex"],
+    ["/p", "/p", "p"],
+  ]) assert.equal(relativeToCwd(file, cwd), expected, `${file} from ${cwd}`);
+});
+
+test("C7: Source paths relative to cwd after resolving symlinks, either way round", () => {
+  const r = rt();
+  fs.mkdirSync(path.join(r.rt, "real", "sec"), { recursive: true });
+  const tex = path.join(r.rt, "real", "sec", "a.tex");
+  fs.writeFileSync(tex, "x");
+  fs.symlinkSync(path.join(r.rt, "real"), path.join(r.rt, "link"));
+  assert.equal(relativeToCwd(tex, path.join(r.rt, "link")), path.join("sec", "a.tex"));
+  assert.equal(relativeToCwd(path.join(r.rt, "link", "sec", "a.tex"), path.join(r.rt, "real")), path.join("sec", "a.tex"));
+});
+
 // ---- C8 -------------------------------------------------------------------------------
 
 /** @param {any} w @param {string} cwd */
@@ -598,6 +755,23 @@ test("C8: a workspace folder inside cwd is relevant", () => {
 test("C8: an unrelated PDF and workspace print nothing (no prefix confusion)", () => {
   assert.equal(hookFor({ focused: true, workspaceFolders: ["/work/projX"], panels: [{ path: "/work/projY/a.pdf", active: true }] }, "/work/proj"), null);
   assert.equal(hookFor({ focused: true, workspaceFolders: ["/elsewhere"], panels: [{ path: "/papers/a.pdf", active: true }] }, "/work/proj"), null);
+});
+
+test("C8: a cwd below the PDF's directory is not relevant (without a workspace folder)", () => {
+  assert.equal(hookFor({ focused: true, panels: [{ path: "/work/papers/a.pdf", active: true }] }, "/work/papers/sub"), null);
+  assert.ok(hookFor({ focused: true, panels: [{ path: "/work/papers/a.pdf", active: true }] }, "/work/papers"));
+});
+
+test("C8: inside: a trailing slash and / as the directory, never a sibling with a common prefix", () => {
+  for (const [inner, outer, expected] of /** @type {[string, string, boolean][]} */ ([
+    ["/a/b/c.pdf", "/a/b", true],
+    ["/a/b/c.pdf", "/a/b/", true],
+    ["/a/b/c.pdf", "/", true],
+    ["/a/b", "/a/b", true],
+    ["/a/bc/c.pdf", "/a/b", false],
+    ["/a/c.pdf", "/a/b", false],
+    ["/a/b/../c.pdf", "/a/b", false],
+  ])) assert.equal(within(inner, outer), expected, `${inner} in ${outer}`);
 });
 
 test("C8: the most-recent fallback is not enough: no tab active means nothing", () => {

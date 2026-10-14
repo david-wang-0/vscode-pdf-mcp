@@ -94,4 +94,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { parseArgs, main };
+module.exports = { USAGE, parseArgs, main };

@@ -7,6 +7,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 const { Client } = require("@modelcontextprotocol/sdk/client/index.js");
 const { StdioClientTransport } = require("@modelcontextprotocol/sdk/client/stdio.js");
 const ipc = require("../extension/ipc");
@@ -82,6 +83,25 @@ test("C4: the server offers viewer_state, get_selection and goto only (no reload
   assert.deepEqual(byName.goto.inputSchema.required, ["page"]);
 });
 
+test("C4: the tools are exactly the README's tool table, with the contract's hints", async () => {
+  const readme = fs.readFileSync(path.resolve(__dirname, "../README.md"), "utf8");
+  const documented = [...readme.matchAll(/^\| `(\w+)\(/gm)].map((m) => m[1]).sort();
+  const { tools } = await client.listTools();
+  assert.deepEqual(tools.map((t) => t.name).sort(), documented);
+  const hints = Object.fromEntries(tools.map((t) => [t.name, t.annotations || {}]));
+  assert.deepEqual(Object.keys(hints).filter((n) => hints[n].readOnlyHint).sort(), ["get_selection", "viewer_state"]);
+  assert.equal(hints.goto.destructiveHint, false);
+  assert.equal(hints.goto.idempotentHint, true);
+});
+
+test("C4: the server and the hook load no PDF library (they never read or write PDF content)", () => {
+  const code = 'require("./mcp/server.js"); require("./lib/hook"); require("./bin/open.js");'
+    + 'console.log(JSON.stringify(Object.keys(require.cache).filter((k) => /pdfjs|pdf-lib|pymupdf/i.test(k))))';
+  const out = spawnSync(process.execPath, ["-e", code], { cwd: path.resolve(__dirname, ".."), encoding: "utf8" });
+  assert.equal(out.status, 0, out.stderr);
+  assert.deepEqual(JSON.parse(out.stdout), []);
+});
+
 test("mcp: server name and instructions (pairs with pdf-reader-writer-mcp; goto only on request)", () => {
   assert.equal(client.getServerVersion()?.name, "vscode-pdf");
   const instructions = client.getInstructions() || "";
@@ -128,6 +148,28 @@ test("C2: get_selection over MCP: primary, clipboard (C5-filled env, unattribute
   res = await call("get_selection", { source: "secondary" });
   assert.equal(res.isError, true);
   assert.equal(textOf(res), "source must be 'primary' or 'clipboard'");
+});
+
+test("C2: a clipboard tool's failure reaches the caller verbatim over MCP", async () => {
+  const none = makeStubs([]);
+  const c = new Client({ name: "test", version: "0" });
+  await c.connect(new StdioClientTransport({ command: process.execPath, args: [SERVER],
+    env: { PATH: none.bin, XDG_RUNTIME_DIR: r.rt, HOME: os.homedir() }, stderr: "pipe" }));
+  try {
+    const res = /** @type {any} */ (await c.callTool({ name: "get_selection", arguments: { source: "clipboard" } }));
+    assert.equal(res.isError, true);
+    assert.equal(textOf(res), "no clipboard tool found: install wl-clipboard (Wayland) or xclip/xsel (X11)");
+  } finally {
+    await c.close();
+    none.cleanup();
+  }
+});
+
+test("C2: get_selection over MCP without any window is unattributed \"\", not an error", async () => {
+  setWindow(null);
+  const res = await call("get_selection");
+  assert.ok(!res.isError);
+  assert.deepEqual(JSON.parse(textOf(res)), { text: "", source: "primary" });
 });
 
 test("C2: get_selection over MCP carries tex when the selection has SyncTeX source lines", async () => {

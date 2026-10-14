@@ -14,7 +14,7 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const backend = require("../lib/backend");
 const ipc = require("../extension/ipc");
-const { parseArgs } = require("../bin/open");
+const { parseArgs, main, USAGE } = require("../bin/open");
 const { deadPid, livePid, killLive, makeRuntime } = require("./helpers/fixtures");
 
 const OPEN = path.resolve(__dirname, "../bin/open.js");
@@ -81,6 +81,71 @@ test("open CLI: arguments (LaTeX Workshop's --tex %TEX% --line %LINE% %PDF%), er
     ["--line", "3", "a.pdf"], ["--frob", "a.pdf"], ["--tex"], ["--tex", "x.tex", "--line", "2", "--column", "x", "a.pdf"]]) {
     assert.ok("error" in parseArgs(bad), JSON.stringify(bad));
   }
+});
+
+test("open CLI: the same arguments as okular-mcp-open: any order, --opt=value, -- before an odd name, column 0", () => {
+  for (const argv of [["--tex", "m.tex", "--line", "12", "a.pdf"], ["--tex=m.tex", "--line=12", "a.pdf"], ["a.pdf", "--line", "12", "--tex", "m.tex"]]) {
+    assert.deepEqual(parseArgs(argv), { pdf: path.resolve("a.pdf"), tex: path.resolve("m.tex"), line: 12 }, JSON.stringify(argv));
+  }
+  assert.deepEqual(parseArgs(["--", "--odd.pdf"]), { pdf: path.resolve("--odd.pdf") });
+  for (const [column, expected] of /** @type {[string, object][]} */ ([["3", { column: 3 }], ["0", { column: 0 }], ["-1", {}]])) {
+    assert.deepEqual(parseArgs(["--tex", "/m.tex", "--line", "2", "--column", column, "/a.pdf"]), { pdf: "/a.pdf", tex: "/m.tex", line: 2, ...expected });
+  }
+  assert.deepEqual(parseArgs(["x.pdf", "-h"]), { help: true });
+});
+
+test("open CLI: the error messages, word for word as okular-mcp-open's", () => {
+  for (const [argv, error] of /** @type {[string[], string][]} */ ([
+    [[], "no PDF given"],
+    [["a.pdf", "b.pdf"], "give exactly one PDF"],
+    [["--tex"], "--tex needs a value"],
+    [["--page", "3", "a.pdf"], "unknown option --page"],
+    [["--line", "3", "a.pdf"], "--line and --column need --tex"],
+    [["--column", "3", "a.pdf"], "--line and --column need --tex"],
+    [["--tex", "m.tex", "a.pdf"], "--tex needs --line <n>, a positive integer"],
+    [["--tex", "m.tex", "--line", "0", "a.pdf"], "--tex needs --line <n>, a positive integer"],
+    [["--tex", "m.tex", "--line", "x", "a.pdf"], "--tex needs --line <n>, a positive integer"],
+    [["--tex", "m.tex", "--line", "2.5", "a.pdf"], "--tex needs --line <n>, a positive integer"],
+    [["--tex", "m.tex", "--line", "2", "--column", "x", "a.pdf"], "--column must be an integer"],
+  ])) assert.deepEqual(parseArgs(argv), { error }, JSON.stringify(argv));
+});
+
+test("open CLI: -h and --help print the usage on stdout and exit 0; bad arguments exit 2 without asking a window", async () => {
+  const r = rt();
+  const w = r.window({ focused: true, panels: [] });
+  const requests = await fakeExtension(w.socket);
+  for (const flag of ["-h", "--help"]) {
+    const out = /** @type {any} */ (await runOpen(["x.pdf", flag], r.dir));
+    assert.deepEqual([out.code, out.stderr], [0, ""]);
+    assert.equal(out.stdout, USAGE);
+    assert.match(out.stdout, /--column/);
+  }
+  const out = /** @type {any} */ (await runOpen(["--line", "3", "a.pdf"], r.dir));
+  assert.deepEqual([out.code, out.stdout], [2, ""]);
+  assert.equal(out.stderr, `vscode-pdf-mcp-open: --line and --column need --tex\n${USAGE}`);
+  assert.deepEqual(requests, []);
+});
+
+test("open CLI: a forward search into a missing PDF exits 1 without asking a window", async () => {
+  const r = rt();
+  const p = project();
+  const w = r.window({ focused: true, panels: [] });
+  const requests = await fakeExtension(w.socket);
+  const gone = path.join(p.dir, "gone.pdf");
+  const out = /** @type {any} */ (await runOpen(["--tex", p.tex, "--line", "3", gone], r.dir));
+  assert.deepEqual([out.code, out.stdout, out.stderr], [1, "", `vscode-pdf-mcp-open: no such file: ${gone}\n`]);
+  assert.deepEqual(requests, []);
+});
+
+test("open CLI: main() returns the exit code (2 for no arguments, 0 for --help)", async (t) => {
+  /** @type {string[]} */
+  const written = [];
+  t.mock.method(process.stderr, "write", (/** @type {string} */ s) => written.push(s));
+  t.mock.method(process.stdout, "write", (/** @type {string} */ s) => written.push(s));
+  assert.equal(await main([]), 2);
+  assert.equal(await main(["--help"]), 0);
+  t.mock.restoreAll();
+  assert.deepEqual(written, [`vscode-pdf-mcp-open: no PDF given\n${USAGE}`, USAGE]);
 });
 
 test("open CLI: <pdf> sends open to the window that has it, prints the entry, exits 0", async () => {
