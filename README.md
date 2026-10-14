@@ -559,7 +559,25 @@ npm ci
 npm test                      # unit and contract tests (node:test), no VS Code needed
 npm run test:webview          # the webview in headless Chromium (see below)
 npm run test:integration      # a real VS Code under xvfb-run (skipped without xvfb-run)
+VPDF_STRICT=1 npm run test:integration   # the same, failing if any part is skipped
+node --test --experimental-test-coverage test/*.test.js   # unit tests with coverage
 ```
+
+What each suite needs (each skips what it cannot run, saying why):
+
+| Suite | Needs | Optional, else that part is skipped |
+|---|---|---|
+| `npm test` | Node 20+ | `pdflatex`, `synctex`, `pdftotext` (TeX Live) for the SyncTeX oracle and word tests; `script` (util-linux) for one hook test |
+| `npm run test:webview` | `playwright-core` (a devDependency) and its Chromium: `node node_modules/playwright-core/cli.js install chromium-headless-shell` once, or `CHROMIUM=<executable>` | a Python with `pymupdf` (`VPDF_PYTHON`, else the one of the installed `pdf-reader-writer-edit`) |
+| `npm run test:integration` | `xvfb-run`; network once, to download VS Code into `.vscode-test/` | pdf-reader-writer-mcp (its `pdf-reader-writer-edit` and `pdf-reader-writer-mcp` on `PATH`) for marking, the concurrency test and marks into the LaTeX source; `pdflatex` for SyncTeX; `todonotes` and pdfnotes.sty for marks into the source |
+
+`test/helpers/prw.js` finds pdf-reader-writer-mcp's pieces for the last two: the edit
+service (`VSCODE_PDF_MCP_EDIT_COMMAND`, else `PATH`), the MCP server (`VPDF_PRW_MCP`, else
+`PATH`), a Python with `pymupdf` (`VPDF_PYTHON`, else the interpreter of the edit service's
+own environment) and pdfnotes.sty (`VPDF_PDFNOTES_DIR`, else the `latex/` directory of a
+pdf-reader-writer-mcp checkout next to this one or of the source tree the edit service was
+installed from, as with `uv tool install -e`, else `kpsewhich`). With pdf-reader-writer-mcp
+installed that way, no variable is needed.
 
 - `npm test` runs `test/*.test.js`: one or more tests per contract clause (named
   `C<N>: ...`), the state store, the socket framing, selection normalisation, and the MCP
@@ -580,8 +598,14 @@ npm run test:integration      # a real VS Code under xvfb-run (skipped without x
   `synctex`. The word matching (`media/wordmatch.mjs`) has unit tests for the
   normalisation (macros, citations, math, quotes, dashes, ligatures, hyphenation) and the
   matching (repeated words by context, no confident match, macro arguments), and an
-  inverse search from every word of the project's second page must land on that word.
-  `vscode-pdf-mcp-open` runs against fake extension sockets.
+  inverse search from every word of the project's second page must land on that word;
+  hand-written SyncTeX files (no TeX needed) cover the post scriptum's scale and offsets,
+  junk in the file, right-to-left lines and symlinked sources.
+  `vscode-pdf-mcp-open` runs against fake extension sockets, with okular-mcp-open's
+  argument cases and error messages word for word. The contract tests mirror okular-mcp's
+  (`tests/test_*.py` there) wherever a case applies to VS Code: the clipboard tools'
+  messages and timeouts, the hook's exit 0 on bad input, a closed stdout, an unreadable
+  stdin and internal errors, and the C7/C8 path tables.
 - `npm run test:webview` serves the webview through `scripts/serve-webview.js` (the same
   HTML and CSP as in VS Code, with a mocked `acquireVsCodeApi`) and drives it with
   `playwright-core`: rendering, mouse selection, goto, reload in place, a half-written
@@ -590,15 +614,20 @@ npm run test:integration      # a real VS Code under xvfb-run (skipped without x
   thread and replies, edit/restyle/delete only on own marks, the side panel, and SyncTeX
   with a mocked extension: the Ctrl+hover underline and tip, Ctrl+click (also on a link)
   with the clicked word, the forward-search flash of a line and of a word (a repeated one,
-  a hyphenated one, one in the next lines' boxes), and Ctrl+wheel zoom with SyncTeX on. Set
-  `CHROMIUM` to a Chromium or Chrome executable (otherwise Playwright's own download is
-  used) and `VPDF_PYTHON` to a Python with `pymupdf` to also check PyMuPDF-written
-  underlines and notes (`scripts/make-annotated-pdf.py`) and links.
+  a hyphenated one, one in the next lines' boxes), and Ctrl+wheel zoom with SyncTeX on.
+  With a Python with `pymupdf` (see above) it also checks PyMuPDF-written underlines and
+  notes (`scripts/make-annotated-pdf.py`) and links.
 - `npm run test:integration` downloads VS Code into `.vscode-test/` with
   `@vscode/test-electron` and runs `test/integration/suite.js` in it with a scratch
   user-data and extensions directory, under `xvfb-run` with `WAYLAND_DISPLAY` and
   `XDG_SESSION_TYPE` unset and Electron pinned to X11, so no window appears on your
-  desktop. `VSCODE_VERSION=1.90.0` tests the oldest supported VS Code. It opens generated
+  desktop. It leaves your VS Code alone: the extension's state directory
+  (`VSCODE_PDF_MCP_DIR`), the user-data and extensions directories and the workspace are
+  in a fresh temporary directory, the `VSCODE_*` and `ELECTRON_*` variables of a VS Code
+  terminal it may be started from are dropped, and the suite checks that the extension
+  uses only these and writes nothing into your state directory. It ends with one line per
+  part (ran, or SKIPPED with the reason); `VPDF_STRICT=1` fails the run on a skip.
+  `VSCODE_VERSION=1.90.0` tests the oldest supported VS Code. It opens generated
   PDFs, checks the state file, goto over the socket (including opening a closed file and
   `cannot open`), replace-by-rename reloads of a background tab,
   the hook, and *Open in Okular* against a fake command; with `pdflatex`, a LaTeX project
@@ -617,17 +646,15 @@ npm run test:integration      # a real VS Code under xvfb-run (skipped without x
   reads the PDF back with PyMuPDF. A concurrency test has the viewer and
   pdf-reader-writer-mcp's MCP server mark one file at the same time and checks that every
   mark of both is there; a control run against a writer that skips the lock logs what it
-  loses. This part needs `pdf-reader-writer-edit` (`VSCODE_PDF_MCP_EDIT_COMMAND` or `PATH`),
-  `pdf-reader-writer-mcp` (`VPDF_PRW_MCP` or `PATH`) and `VPDF_PYTHON`, and is skipped
-  without them. Marks into the LaTeX source: a document that loads todonotes and pdfnotes,
+  loses. This part needs pdf-reader-writer-mcp's edit service, its MCP server and a
+  Python with `pymupdf` (found as above), and is skipped without them. Marks into the LaTeX source: a document that loads todonotes and pdfnotes,
   built with two `pdflatex` runs, its source open in an editor; a highlight made with the
   mouse becomes a `\pdfmark` with an id that is the annotation's `/NM`, and the editor
   shows it; a note on it, its deletion and Ctrl+Z follow in the source (the macro back
   with the same id); with unsaved changes in the source, a mark leaves the file alone until
   it is saved; one sync per action, none from the reloads they cause. It also needs
-  protocol 2 of the edit service and pdfnotes.sty (from `VPDF_PDFNOTES_DIR`, else the
-  `latex/` directory of a pdf-reader-writer-mcp checkout next to this one, else wherever
-  `kpsewhich` finds it), and is skipped without them. On VS Code 1.90, Playwright cannot
+  protocol 2 of the edit service and pdfnotes.sty (found as above), and is skipped without
+  them. On VS Code 1.90, Playwright cannot
   reach the webview's frame, so the mouse-and-keyboard steps are skipped there.
 - `node scripts/serve-webview.js some.pdf 8000` serves the webview for a browser by hand.
 - Plain JavaScript with `// @ts-check` and JSDoc types, no build step. vscode-free logic
