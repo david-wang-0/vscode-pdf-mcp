@@ -118,6 +118,28 @@ test("C1: state files of dead pids, unparsable files and other versions are igno
   assert.deepEqual(backend.viewerState({ dir: r.dir }).map((e) => e.path), ["/live.pdf"]);
 });
 
+test("C1: in a state file, malformed parts are dropped or defaulted and the rest is kept", () => {
+  assert.equal(backend.normaliseState(null), null);
+  assert.equal(backend.normaliseState("x"), null);
+  assert.equal(backend.normaliseState({ version: 1, pid: -3, panels: [] }), null);
+  assert.equal(backend.normaliseState({ version: 1, pid: 7 }), null, "no panels list");
+  const s = backend.normaliseState({
+    version: 1, pid: 7, socket: 5, focused: "yes", focusedAt: "late", workspaceFolders: ["/w", 3, null],
+    panels: [
+      null, { path: "relative.pdf" }, { path: 9 },
+      { id: 4, path: "/a.pdf", page: "3", pages: 2.5, active: 1, lastActiveAt: Infinity, selection: { text: "t", page: "1" } },
+      { id: "b", path: "/b.pdf", page: 2, pages: 9, active: true, lastActiveAt: 5, selection: { text: "w", page: 2, tex: [{ file: "/b.tex", lines: [3, 4] }] } },
+    ],
+  });
+  assert.deepEqual(s, {
+    version: 1, pid: 7, socket: "", focused: false, focusedAt: 0, workspaceFolders: ["/w"],
+    panels: [
+      { id: "4", path: "/a.pdf", page: 0, pages: 0, active: false, lastActiveAt: 0, selection: null },
+      { id: "b", path: "/b.pdf", page: 2, pages: 9, active: true, lastActiveAt: 5, selection: { text: "w", page: 2, tex: [{ file: "/b.tex", lines: [3, 4] }] } },
+    ],
+  });
+});
+
 test("C1: nothing open raises 'no VS Code window with a PDF open'", () => {
   const r = rt();
   r.window({ focused: true, panels: [] });
