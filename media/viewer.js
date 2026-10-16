@@ -1,9 +1,9 @@
 // @ts-check
 /**
  * The PDF viewer webview: pdf.js PDFViewer with text layer (selection), annotation layer
- * (highlights, notes, links), find bar and a minimal toolbar. It reports page, page count
- * and selection to the extension, and obeys `load` (initial and on-disk reloads) and
- * `goto`.
+ * (highlights, notes, links), find bar, a minimal toolbar and a minimap of page
+ * thumbnails (minimap.mjs). It reports page, page count and selection to the extension,
+ * and obeys `load` (initial and on-disk reloads) and `goto`.
  *
  * Messages to the extension: ready, loaded {pages, page, reload}, loadError {message,
  * reload}, page {page}, selection {selection: {text, page, parts?} | null} (`parts`: the
@@ -18,6 +18,7 @@
 import { normaliseSelection } from "./textnorm.mjs";
 import { setupMarking } from "./annotate.mjs";
 import { setupSynctex } from "./synctex.mjs";
+import { setupMinimap } from "./minimap.mjs";
 
 // @ts-ignore provided by VS Code (or the development harness)
 const vscode = acquireVsCodeApi();
@@ -110,6 +111,7 @@ const isVisible = () => panelVisible && container.clientWidth > 0 && container.c
 
 /** Things that wait for the tab to be shown: a deferred reload, a goto made while hidden. */
 function onShown() {
+  minimap.onShown();
   if (!isVisible()) return;
   if (deferred) {
     showDeferred();
@@ -282,6 +284,7 @@ new ResizeObserver(() => {
     const v = pdfViewer.currentScaleValue;
     if (pdfDocument && (v === "page-width" || v === "page-fit" || v === "auto")) pdfViewer.currentScaleValue = v;
   }
+  minimap.refresh();
   onShown();
 }).observe(container);
 
@@ -433,12 +436,17 @@ synctex.onAvailabilityChange(() => {
   reportSelection();
 });
 
+// ---- minimap (minimap.mjs) ---------------------------------------------------------------
+
+const minimap = setupMinimap({ pdfViewer, eventBus, container, getDocument: () => pdfDocument, vscode, isVisible, pdfjsLib });
+
 // ---- messages from the extension -----------------------------------------------------
 
 handle = (msg) => {
   if (!msg || typeof msg !== "object") return;
   if (marking.handle(msg)) return;
   if (synctex.handle(msg)) return;
+  if (minimap.handle(msg)) return;
   if (msg.type === "load") {
     void load(msg.data instanceof Uint8Array ? msg.data : new Uint8Array(msg.data), !!msg.reload);
   } else if (msg.type === "visibility") {

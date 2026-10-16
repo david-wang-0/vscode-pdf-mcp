@@ -45,8 +45,8 @@ function serve(pdf) {
   });
 }
 
-/** @param {string} url */
-async function open(url) {
+/** @param {string} url @param {() => void} [init] runs in the page before its own scripts */
+async function open(url, init) {
   const page = await browser.newPage({ viewport: { width: 1000, height: 800 } });
   /** @type {string[]} */
   const errors = [];
@@ -54,6 +54,7 @@ async function open(url) {
   page.on("console", (m) => {
     if (m.type() === "error") errors.push(m.text());
   });
+  if (init) await page.addInitScript(init);
   await page.goto(url);
   await page.waitForFunction(() => /** @type {any} */ (window).__posted.some((/** @type {any} */ m) => m.type === "loaded"));
   await page.waitForSelector(".page[data-page-number='1'] .textLayer span");
@@ -986,6 +987,632 @@ test("SyncTeX: Ctrl+wheel still zooms, and hides the underline during the gestur
   await page.waitForFunction((z) => parseInt(document.getElementById("zoomValue")?.textContent || "", 10) > z, before);
   await page.keyboard.up("Control");
   assert.ok((await zoom()) > before);
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+// ---- minimap -------------------------------------------------------------------------
+
+/** Open the minimap (on by default) and wait for its thumbnails. @param {import("playwright-core").Page} page @param {number} pages */
+async function openMinimap(page, pages) {
+  if (await page.getAttribute("#minimapToggle", "aria-pressed") !== "true") await page.click("#minimapToggle");
+  await page.waitForFunction((n) => document.querySelectorAll("#minimap .thumb").length === n, pages);
+}
+
+/** Does thumbnail `n`'s canvas show text (dark opaque pixels)? Runs in the page. @param {number} n */
+function thumbInked(n) {
+  const c = /** @type {HTMLCanvasElement | null} */ (document.querySelector(`#minimap .thumb[data-page-number='${n}'] canvas`));
+  const ctx = c && c.width > 1 ? c.getContext("2d") : null;
+  if (!c || !ctx) return false;
+  const d = ctx.getImageData(0, 0, c.width, c.height).data;
+  for (let i = 0; i < d.length; i += 4) if (d[i + 3] === 255 && d[i] < 160) return true;
+  return false;
+}
+
+/** Thumbnail `n` and the viewport box, in minimap content coordinates. Runs in the page. @param {number} n */
+function minimapGeom(n) {
+  const m = /** @type {HTMLElement} */ (document.getElementById("minimap"));
+  const t = /** @type {HTMLElement} */ (m.querySelector(`.thumb[data-page-number='${n}']`));
+  const b = /** @type {HTMLElement} */ (m.querySelector(".viewportBox"));
+  return {
+    thumbTop: t.offsetTop, thumbBottom: t.offsetTop + t.offsetHeight, boxTop: b.offsetTop, boxHeight: b.offsetHeight,
+    boxHidden: b.hidden, scrollTop: m.scrollTop, clientHeight: m.clientHeight, scrollHeight: m.scrollHeight,
+  };
+}
+
+test("minimap: on by default with one thumbnail per page in the page's aspect ratio; visible thumbnails render; the toggle is remembered", async () => {
+  const pdf = path.join(tmp, "minimap.pdf");
+  fs.writeFileSync(pdf, samplePdf(5));
+  const url = await serve(pdf);
+  const { page, errors } = await open(url);
+  assert.equal(await page.evaluate(() => /** @type {any} */ (window).__state.minimapOpen), undefined, "nothing saved yet");
+  await page.waitForFunction(() => document.querySelectorAll("#minimap .thumb").length === 5);
+  assert.equal(await page.getAttribute("#minimapToggle", "aria-pressed"), "true");
+  assert.ok(await page.locator("#minimap").isVisible());
+  assert.equal(await page.evaluate(() => document.body.classList.contains("minimap-open")), true);
+  const ratios = await page.locator(".page").evaluateAll((els) => els.map((e) => e.clientHeight / e.clientWidth));
+  const thumbs = await page.locator("#minimap .thumb").evaluateAll((els) => els.map((e) => ({ w: e.clientWidth, h: e.clientHeight, title: /** @type {HTMLElement} */ (e).title })));
+  thumbs.forEach((t, i) => {
+    assert.equal(t.w, 100);
+    assert.ok(Math.abs(t.h - 100 * ratios[i]) <= 1, `thumb ${i + 1}: ${t.h} px for ratio ${ratios[i]}`);
+    assert.equal(t.title, `Page ${i + 1}`);
+  });
+  await page.waitForFunction(thumbInked, 1);
+  // page 5 is not drawn by the main view at this zoom: its thumbnail is the minimap's own render
+  await page.waitForFunction(thumbInked, 5);
+
+  // the toggle hides it and is remembered; annotate.mjs's preferences and the minimap's
+  // share the state, in both directions
+  await page.click("#minimapToggle");
+  assert.ok(await page.locator("#minimap").isHidden());
+  assert.equal(await page.getAttribute("#minimapToggle", "aria-pressed"), "false");
+  assert.equal(await page.evaluate(() => document.body.classList.contains("minimap-open")), false);
+  await page.click("#panelToggle");
+  assert.deepEqual(await page.evaluate(() => {
+    const s = /** @type {any} */ (window).__state;
+    return [s.minimapOpen, s.panelOpen];
+  }), [false, true]);
+  await page.click("#minimapToggle");
+  assert.deepEqual(await page.evaluate(() => {
+    const s = /** @type {any} */ (window).__state;
+    return [s.minimapOpen, s.panelOpen];
+  }), [true, true]);
+  assert.ok(await page.locator("#minimap").isVisible());
+
+  // a saved "closed" starts it closed
+  const closed = await open(url, () => {
+    /** @type {any} */ (window).__state = { minimapOpen: false };
+  });
+  assert.ok(await closed.page.locator("#minimap").isHidden());
+  assert.equal(await closed.page.getAttribute("#minimapToggle", "aria-pressed"), "false");
+  assert.equal(await closed.page.evaluate(() => document.body.classList.contains("minimap-open")), false);
+  await openMinimap(closed.page, 5);
+  assert.equal(await closed.page.evaluate(() => /** @type {any} */ (window).__state.minimapOpen), true);
+
+  assert.deepEqual(errors, []);
+  assert.deepEqual(closed.errors, []);
+  await closed.page.close();
+  await page.close();
+});
+
+test("minimap: the viewport box follows scrolling and zoom; click and drag scroll the pages", async () => {
+  const pdf = path.join(tmp, "minimap-box.pdf");
+  fs.writeFileSync(pdf, samplePdf(5));
+  const { page, errors } = await open(await serve(pdf));
+  await openMinimap(page, 5);
+
+  let mark = await count(page);
+  await page.evaluate(() => /** @type {any} */ (window).__send({ type: "goto", page: 3, reqId: 3 }));
+  await posted(page, { type: "gotoDone", reqId: 3 }, mark);
+  await page.waitForFunction((n) => {
+    const m = /** @type {HTMLElement} */ (document.getElementById("minimap"));
+    const t = /** @type {HTMLElement} */ (m.querySelector(`.thumb[data-page-number='${n}']`));
+    const b = /** @type {HTMLElement} */ (m.querySelector(".viewportBox"));
+    return !b.hidden && b.offsetTop >= t.offsetTop && b.offsetTop < t.offsetTop + t.offsetHeight;
+  }, 3);
+  assert.ok(await page.locator("#minimap .thumb.current[data-page-number='3']").count(), "page 3 is marked current");
+
+  // a click scrolls the pages there
+  const t5 = await page.locator("#minimap .thumb[data-page-number='5']").boundingBox();
+  const t2 = await page.locator("#minimap .thumb[data-page-number='2']").boundingBox();
+  assert.ok(t5 && t2);
+  mark = await count(page);
+  await page.mouse.click(t5.x + t5.width / 2, t5.y + t5.height / 2);
+  await posted(page, { type: "page", page: 5 }, mark);
+
+  // a drag follows the pointer
+  mark = await count(page);
+  await page.mouse.move(t5.x + t5.width / 2, t5.y + t5.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(t2.x + t2.width / 2, t2.y + t2.height / 2, { steps: 8 });
+  await page.mouse.up();
+  await page.waitForFunction((start) => {
+    const pages = /** @type {any} */ (window).__posted.slice(start).filter((/** @type {any} */ m) => m.type === "page");
+    return pages.length && pages[pages.length - 1].page <= 2;
+  }, mark);
+
+  // zooming in shows less of the document: a smaller box
+  const before = await page.evaluate(minimapGeom, 2);
+  await page.click("#zoomIn");
+  await page.waitForFunction((h) => {
+    const b = /** @type {HTMLElement} */ (document.querySelector("#minimap .viewportBox"));
+    return b.offsetHeight < h;
+  }, before.boxHeight);
+
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test("minimap: a reload keeps the thumbnails on screen and re-renders them", async () => {
+  const pdf = path.join(tmp, "minimap-reload.pdf");
+  fs.writeFileSync(pdf, samplePdf(5));
+  const { page, errors } = await open(await serve(pdf));
+  await openMinimap(page, 5);
+  await page.waitForFunction(thumbInked, 1);
+  const image = () => page.evaluate(() => /** @type {HTMLCanvasElement} */ (document.querySelector("#minimap .thumb[data-page-number='1'] canvas")).toDataURL());
+  const old = await image();
+  await page.evaluate(() => {
+    /** @type {HTMLElement} */ (document.querySelector("#minimap .thumb[data-page-number='1']")).dataset.marker = "kept";
+  });
+
+  // the same pages with other text (the heading of each page gains "v2")
+  fs.writeFileSync(pdf, samplePdf(5, "v2"));
+  const mark = await count(page);
+  await page.evaluate(() => /** @type {any} */ (window).__reload());
+  await posted(page, { type: "loaded", reload: true }, mark);
+  assert.equal(await page.locator("#minimap .thumb").count(), 5);
+  assert.equal(await page.getAttribute("#minimap .thumb[data-page-number='1']", "data-marker"), "kept", "the same element");
+  assert.ok(await page.evaluate(thumbInked, 1), "the old image stays until the new one is ready");
+  await page.waitForFunction((o) => /** @type {HTMLCanvasElement} */ (document.querySelector("#minimap .thumb[data-page-number='1'] canvas")).toDataURL() !== o, old);
+  assert.ok(await page.evaluate(thumbInked, 1));
+
+  // other page sizes: made anew
+  fs.writeFileSync(pdf, samplePdf(3));
+  await page.evaluate(() => /** @type {any} */ (window).__reload());
+  await page.waitForFunction(() => document.querySelectorAll("#minimap .thumb").length === 3);
+  assert.equal(await page.getAttribute("#minimap .thumb[data-page-number='1']", "data-marker"), null);
+
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test("minimap: annotations show as coloured rects on their page", async () => {
+  const pdf = path.join(tmp, "minimap-annots.pdf");
+  fs.writeFileSync(pdf, threadPdf().data);
+  const { page, errors } = await open(await serve(pdf));
+  await openMinimap(page, 2);
+  const marks = page.locator("#minimap .thumb[data-page-number='1'] .overlay > *");
+  // highlight A, underline C, margin note D; the replies B and E are not drawn
+  await page.waitForFunction(() => document.querySelectorAll("#minimap .thumb[data-page-number='1'] .overlay > *").length === 3);
+  const got = await marks.evaluateAll((els) => els.map((e) => {
+    const s = getComputedStyle(e);
+    return { note: e.classList.contains("noteMark"), bg: s.backgroundColor, left: parseFloat(s.left), top: parseFloat(s.top), w: parseFloat(s.width), h: parseFloat(s.height) };
+  }));
+  for (const m of got) assert.notEqual(m.bg, "rgba(0, 0, 0, 0)");
+  const yellow = got.find((m) => /^rgb\(255, 230, 7[67]\)$/.test(m.bg));
+  assert.ok(yellow, `the yellow highlight: ${JSON.stringify(got)}`);
+  // its quad: x 72..400, y 689..703 on a 612 x 792 page, in a 100 x 129 px thumbnail
+  assert.ok(Math.abs(yellow.left - (72 / 612) * 100) < 1 && Math.abs(yellow.top - ((792 - 703) / 792) * 129) < 1, JSON.stringify(yellow));
+  assert.ok(Math.abs(yellow.w - (328 / 612) * 100) < 1 && yellow.h >= 2, JSON.stringify(yellow));
+  assert.equal(got.filter((m) => m.note).length, 1);
+  assert.equal(await page.locator("#minimap .thumb[data-page-number='2'] .overlay > *").count(), 0);
+
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test("minimap: a long document's minimap scrolls so the box stays in view", async () => {
+  const pdf = path.join(tmp, "minimap-long.pdf");
+  fs.writeFileSync(pdf, samplePdf(60));
+  const { page, errors } = await open(await serve(pdf));
+  await openMinimap(page, 60);
+  await page.waitForFunction(thumbInked, 1);
+  await page.evaluate(() => {
+    const c = /** @type {HTMLElement} */ (document.getElementById("viewerContainer"));
+    c.scrollTop = c.scrollHeight;
+  });
+  await page.waitForFunction(() => {
+    const m = /** @type {HTMLElement} */ (document.getElementById("minimap"));
+    const b = /** @type {HTMLElement} */ (m.querySelector(".viewportBox"));
+    return m.scrollTop > 0 && b.offsetTop >= m.scrollTop && b.offsetTop < m.scrollTop + m.clientHeight;
+  });
+  const g = await page.evaluate(minimapGeom, 60);
+  assert.ok(g.boxTop + g.boxHeight <= g.thumbBottom + 1, `the box ends at the last page: ${JSON.stringify(g)}`);
+
+  // lazily: the thumbnails in view render, those never near it do not
+  await page.waitForFunction(thumbInked, 60);
+  assert.equal(await page.evaluate(thumbInked, 30), false);
+  // and the eviction sweep (a second after the minimap stops) leaves the ones in view alone
+  await page.waitForTimeout(1300);
+  assert.ok(await page.evaluate(thumbInked, 60));
+
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test("minimap: the pages the main view renders are copied into their thumbnails; without idle time nothing else renders", async () => {
+  const pdf = path.join(tmp, "minimap-copy.pdf");
+  fs.writeFileSync(pdf, samplePdf(5));
+  // no idle callbacks ever: the minimap's own renders cannot start; it starts closed
+  const { page, errors } = await open(await serve(pdf), () => {
+    const w = /** @type {any} */ (window);
+    w.requestIdleCallback = () => 0;
+    w.cancelIdleCallback = () => {};
+    w.__state = { minimapOpen: false };
+  });
+  await openMinimap(page, 5);
+  // page 1 was drawn before the minimap opened: copied when it opens
+  await page.waitForFunction(thumbInked, 1);
+  // page 5 is not drawn by the main view at this zoom, so its thumbnail stays blank
+  const drawn = (/** @type {number} */ n) => page.evaluate((k) => {
+    const div = /** @type {HTMLElement} */ (document.querySelector(`.page[data-page-number='${k}']`));
+    return div.hasAttribute("data-loaded") || !!div.querySelector("canvas");
+  }, n);
+  assert.equal(await drawn(5), false);
+  await page.waitForTimeout(700);
+  assert.equal(await page.evaluate(thumbInked, 5), false);
+
+  // a reload: the main view draws page 1 again, and its thumbnail follows (on pagerendered)
+  const image = () => page.evaluate(() => /** @type {HTMLCanvasElement} */ (document.querySelector("#minimap .thumb[data-page-number='1'] canvas")).toDataURL());
+  const old = await image();
+  fs.writeFileSync(pdf, samplePdf(5, "v2"));
+  await page.evaluate(() => /** @type {any} */ (window).__reload());
+  await page.waitForFunction((o) => /** @type {HTMLCanvasElement} */ (document.querySelector("#minimap .thumb[data-page-number='1'] canvas")).toDataURL() !== o, old);
+  assert.ok(await page.evaluate(thumbInked, 1));
+  assert.equal(await drawn(5), false);
+  assert.equal(await page.evaluate(thumbInked, 5), false);
+
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test("minimap: thumbnails far from view are emptied, those near it kept", async () => {
+  const pdf = path.join(tmp, "minimap-evict.pdf");
+  fs.writeFileSync(pdf, samplePdf(60));
+  const { page, errors } = await open(await serve(pdf));
+  await openMinimap(page, 60);
+  await page.waitForFunction(thumbInked, 1);
+  const mark = await count(page);
+  await page.evaluate(() => /** @type {any} */ (window).__send({ type: "goto", page: 60, reqId: 60 }));
+  await posted(page, { type: "gotoDone", reqId: 60 }, mark);
+  await page.waitForFunction(thumbInked, 60);
+  // page 1 is 59 pages from anything in view: emptied, its element and height kept
+  await page.waitForFunction(() => {
+    const c = /** @type {HTMLCanvasElement} */ (document.querySelector("#minimap .thumb[data-page-number='1'] canvas"));
+    return c.width === 1 && c.height === 1;
+  }, null, { timeout: 5000 });
+  assert.equal(await page.locator("#minimap .thumb").count(), 60);
+  assert.ok(Math.abs((await page.locator("#minimap .thumb[data-page-number='1']").evaluate((e) => e.clientHeight)) - 129) <= 1);
+  for (let n = 55; n <= 60; n++) await page.waitForFunction(thumbInked, n);
+
+  // back at the start, page 1 comes back (copied from the main view)
+  await page.evaluate(() => /** @type {any} */ (window).__send({ type: "goto", page: 1, reqId: 61 }));
+  await page.waitForFunction(thumbInked, 1);
+
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test("minimap: a landscape page and a page with /Rotate 90 get landscape thumbnails, and their own renders are upright", async () => {
+  const pdf = path.join(tmp, "minimap-rotate.pdf");
+  // page 3 landscape by its size, page 4 by /Rotate 90; neither is drawn by the main view
+  const boxes = [undefined, undefined, { size: /** @type {[number, number]} */ ([792, 612]) }, { rotate: 90 }];
+  fs.writeFileSync(pdf, makePdf([1, 2, 3, 4, 5, 6].map((p) => sampleLines(p)), { boxes }));
+  const { page, errors } = await open(await serve(pdf));
+  await openMinimap(page, 6);
+  for (const n of [3, 4]) {
+    // every page's size is known after pagesloaded: the thumbnail is 100 x 77
+    await page.waitForFunction((k) => {
+      const t = /** @type {HTMLElement} */ (document.querySelector(`#minimap .thumb[data-page-number='${k}']`));
+      return Math.abs(t.clientHeight - (100 * 612) / 792) <= 1;
+    }, n);
+    await page.waitForFunction(thumbInked, n);
+    // the image has the thumbnail's shape (an own render of page 4 that left out its
+    // /Rotate would be portrait, squeezed into the landscape box)
+    await page.waitForFunction((k) => {
+      const t = /** @type {HTMLElement} */ (document.querySelector(`#minimap .thumb[data-page-number='${k}']`));
+      const c = /** @type {HTMLCanvasElement} */ (t.querySelector("canvas"));
+      return Math.abs(c.height / c.width - t.clientHeight / t.clientWidth) < 0.03;
+    }, n, { timeout: 5000 });
+  }
+  assert.equal(await page.evaluate(() => /** @type {HTMLElement} */ (document.querySelector(".page[data-page-number='4']")).querySelector("canvas")), null, "page 4 was the minimap's own render");
+
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test("minimap: a page request that never settles does not stop the thumbnails after a reload", async () => {
+  const pdf = path.join(tmp, "minimap-stuck.pdf");
+  fs.writeFileSync(pdf, samplePdf(10));
+  // The reply to the first request for page 6 never arrives, as when the worker answers
+  // after the old document of a reload has gone (its message handler is destroyed and
+  // the request's promise is never settled).
+  const { page, errors } = await open(await serve(pdf), () => {
+    const w = /** @type {any} */ (window);
+    w.__holdPage = 5;
+    w.__held = 0;
+    const Base = w.Worker;
+    /** @type {Set<string>} */
+    const held = new Set();
+    w.Worker = class extends Base {
+      /** @param {any} m @param {any} [t] */
+      postMessage(m, t) {
+        if (m && m.action === "GetPage" && m.data?.pageIndex === w.__holdPage) {
+          w.__holdPage = null;
+          w.__held++;
+          held.add(`${m.sourceName}:${m.callbackId}`);
+        }
+        return super.postMessage(m, t);
+      }
+      /** @param {string} type @param {any} fn @param {any} [opts] */
+      addEventListener(type, fn, opts) {
+        if (type !== "message") return super.addEventListener(type, fn, opts);
+        return super.addEventListener(type, (/** @type {MessageEvent} */ e) => {
+          const d = e.data;
+          if (d && d.callback && held.has(`${d.targetName}:${d.callbackId}`)) return;
+          fn.call(this, e);
+        }, opts);
+      }
+    };
+  });
+  await openMinimap(page, 10);
+  // pages 3 to 5 are the minimap's own renders; page 6's waits for its page
+  for (const n of [3, 4, 5]) await page.waitForFunction(thumbInked, n);
+  assert.equal(await page.evaluate(() => /** @type {any} */ (window).__held), 1);
+  await page.waitForTimeout(500);
+  assert.equal(await page.evaluate(thumbInked, 7), false, "page 7 waits behind page 6");
+
+  const image = (/** @type {number} */ n) => page.evaluate((k) => /** @type {HTMLCanvasElement} */ (document.querySelector(`#minimap .thumb[data-page-number='${k}'] canvas`)).toDataURL(), n);
+  const old = await image(4);
+  fs.writeFileSync(pdf, samplePdf(10, "v2"));
+  const mark = await count(page);
+  await page.evaluate(() => /** @type {any} */ (window).__reload());
+  await posted(page, { type: "loaded", reload: true }, mark);
+  // the new document's page 4 is rendered into its thumbnail (the main view does not draw it)
+  await page.waitForFunction((o) => /** @type {HTMLCanvasElement} */ (document.querySelector("#minimap .thumb[data-page-number='4'] canvas")).toDataURL() !== o, old, { timeout: 5000 });
+  await page.waitForFunction(thumbInked, 7);
+
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+/** Init script: idle callbacks run only when the test calls `window.__idle()`. */
+function manualIdle() {
+  const w = /** @type {any} */ (window);
+  /** @type {(Function | null)[]} */
+  const q = [];
+  w.requestIdleCallback = (/** @type {Function} */ fn) => q.push(fn);
+  w.cancelIdleCallback = (/** @type {number} */ id) => {
+    q[id - 1] = null;
+  };
+  w.__idlePending = () => q.some(Boolean);
+  w.__idle = () => {
+    const fns = q.slice();
+    q.fill(null);
+    for (const f of fns) f?.({ didTimeout: false, timeRemaining: () => 50 });
+  };
+}
+
+test("minimap: a hidden tab renders no thumbnails; shown again, it does", async () => {
+  const pdf = path.join(tmp, "minimap-hidden.pdf");
+  fs.writeFileSync(pdf, samplePdf(5));
+  const { page, errors } = await open(await serve(pdf), manualIdle);
+  await openMinimap(page, 5);
+  await page.waitForFunction(thumbInked, 1);
+  await page.evaluate(() => /** @type {any} */ (window).__send({ type: "visibility", visible: false }));
+  // well past the quiet period, with idle time on offer every frame
+  const until = Date.now() + 800;
+  while (Date.now() < until) {
+    await page.evaluate(() => /** @type {any} */ (window).__idle());
+    await page.waitForTimeout(50);
+  }
+  assert.equal(await page.evaluate(thumbInked, 5), false);
+
+  await page.evaluate(() => /** @type {any} */ (window).__send({ type: "visibility", visible: true }));
+  const end = Date.now() + 5000;
+  while (!(await page.evaluate(thumbInked, 5))) {
+    assert.ok(Date.now() < end, "page 5 rendered once shown");
+    await page.evaluate(() => /** @type {any} */ (window).__idle());
+    await page.waitForTimeout(50);
+  }
+
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test("minimap: a click puts that point of the page in the middle of the view; the box matches the view, also with the find bar and the side panel open; closed, the pages get its width", async () => {
+  const pdf = path.join(tmp, "minimap-seek.pdf");
+  fs.writeFileSync(pdf, samplePdf(60));
+  const { page, errors } = await open(await serve(pdf));
+  await openMinimap(page, 60);
+
+  /** Where the middle of the view is: page and fraction of its height. */
+  const middle = () => page.evaluate(() => {
+    const c = /** @type {HTMLElement} */ (document.getElementById("viewerContainer"));
+    const r = c.getBoundingClientRect();
+    const y = r.top + c.clientHeight / 2;
+    for (const p of document.querySelectorAll(".page")) {
+      const b = p.getBoundingClientRect();
+      if (y >= b.top && y < b.bottom) return { page: Number(/** @type {HTMLElement} */ (p).dataset.pageNumber), frac: (y - b.top) / b.height };
+    }
+    return null;
+  });
+  /** The box against the view (not at the last page). */
+  const boxCheck = () => page.evaluate(() => {
+    const c = /** @type {HTMLElement} */ (document.getElementById("viewerContainer"));
+    const m = /** @type {HTMLElement} */ (document.getElementById("minimap"));
+    const b = /** @type {HTMLElement} */ (m.querySelector(".viewportBox"));
+    const cr = c.getBoundingClientRect();
+    // measured afresh: from a page's top to the next one's onto the same span of the thumbnails
+    const pages = [...document.querySelectorAll(".page")].map((p) => p.getBoundingClientRect().top - cr.top + c.scrollTop);
+    const tops = [...m.querySelectorAll(".thumb")].map((t) => /** @type {HTMLElement} */ (t).offsetTop);
+    /** @param {number} y content y of the view */
+    const at = (y) => {
+      const i = pages.findLastIndex((top) => top <= y);
+      return tops[i] + ((y - pages[i]) / (pages[i + 1] - pages[i])) * (tops[i + 1] - tops[i]);
+    };
+    return { top: b.offsetTop, want: at(c.scrollTop), bottom: b.offsetTop + b.offsetHeight, wantBottom: at(c.scrollTop + c.clientHeight) };
+  });
+  const boxMatches = async (/** @type {string} */ what) => {
+    // the box follows in the next frame
+    await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+    const g = await boxCheck();
+    assert.ok(Math.abs(g.top - g.want) <= 2 && Math.abs(g.bottom - g.wantBottom) <= 2, `${what}: ${JSON.stringify(g)}`);
+  };
+
+  // far down the document, with the minimap scrolled along: a click a quarter down page 50's thumbnail
+  let mark = await count(page);
+  await page.evaluate(() => /** @type {any} */ (window).__send({ type: "goto", page: 48, reqId: 1 }));
+  await posted(page, { type: "gotoDone", reqId: 1 }, mark);
+  await page.waitForFunction(() => /** @type {HTMLElement} */ (document.getElementById("minimap")).scrollTop > 0);
+  const t50 = page.locator("#minimap .thumb[data-page-number='50']");
+  await t50.scrollIntoViewIfNeeded();
+  const b50 = await t50.boundingBox();
+  assert.ok(b50);
+  await page.mouse.click(b50.x + b50.width / 2, b50.y + b50.height / 4);
+  const mid = await middle();
+  assert.ok(mid && mid.page === 50 && Math.abs(mid.frac - 0.25) < 0.03, JSON.stringify(mid));
+  await boxMatches("after the click");
+
+  // the find bar lowers both panels; the side panel narrows the pages (page-width refits)
+  await page.keyboard.press("Control+f");
+  await page.waitForSelector("#findbar:not([hidden])");
+  await boxMatches("find bar open");
+  await page.click("#panelToggle");
+  await page.waitForFunction(() => document.body.classList.contains("panel-open"));
+  await page.waitForTimeout(200);
+  await boxMatches("side panel open");
+  await page.click("#panelToggle");
+
+  // closed: the pages take its width (page-width refits to the wider view)
+  const width = () => page.evaluate(() => /** @type {HTMLElement} */ (document.querySelector(".page")).getBoundingClientRect().width);
+  const before = await width();
+  await page.click("#minimapToggle");
+  await page.waitForFunction((w) => /** @type {HTMLElement} */ (document.querySelector(".page")).getBoundingClientRect().width > w + 60, before);
+
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test("minimap: the wheel scrolls the minimap, not the pages", async () => {
+  const pdf = path.join(tmp, "minimap-wheel.pdf");
+  fs.writeFileSync(pdf, samplePdf(60));
+  const { page, errors } = await open(await serve(pdf));
+  await openMinimap(page, 60);
+  await page.waitForFunction(thumbInked, 1);
+  const before = await page.evaluate(() => /** @type {HTMLElement} */ (document.getElementById("viewerContainer")).scrollTop);
+  const m = await page.locator("#minimap").boundingBox();
+  assert.ok(m);
+  await page.mouse.move(m.x + m.width / 2, m.y + m.height / 2);
+  await page.mouse.wheel(0, 1500);
+  await page.waitForFunction(() => /** @type {HTMLElement} */ (document.getElementById("minimap")).scrollTop > 500);
+  await page.waitForTimeout(100);
+  assert.equal(await page.evaluate(() => /** @type {HTMLElement} */ (document.getElementById("viewerContainer")).scrollTop), before);
+  assert.ok(await page.evaluate(() => /** @type {HTMLElement} */ (document.getElementById("minimap")).scrollTop > 500), "the pages' scroll position did not pull it back");
+
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test("minimap: closed through reloads, it matches the document shown when it opens again", async () => {
+  const pdf = path.join(tmp, "minimap-closed-reloads.pdf");
+  fs.writeFileSync(pdf, samplePdf(5));
+  const { page, errors } = await open(await serve(pdf));
+  await openMinimap(page, 5);
+  await page.waitForFunction(thumbInked, 1);
+  await page.click("#minimapToggle");
+
+  // a rewrite with the same pages, then one with three, the second landscape
+  let mark = await count(page);
+  fs.writeFileSync(pdf, samplePdf(5, "v2"));
+  await page.evaluate(() => /** @type {any} */ (window).__reload());
+  await posted(page, { type: "loaded", reload: true }, mark);
+  mark = await count(page);
+  const boxes = [undefined, { size: /** @type {[number, number]} */ ([792, 612]) }];
+  fs.writeFileSync(pdf, makePdf([1, 2, 3].map((p) => sampleLines(p, "v3")), { boxes }));
+  await page.evaluate(() => /** @type {any} */ (window).__reload());
+  await posted(page, { type: "loaded", reload: true, pages: 3 }, mark);
+  await page.waitForTimeout(300);
+  assert.equal(await page.locator("#minimap .thumb").count(), 5, "nothing done while closed");
+
+  await openMinimap(page, 3);
+  await page.waitForFunction(() => Math.abs(/** @type {HTMLElement} */ (document.querySelector("#minimap .thumb[data-page-number='2']")).clientHeight - (100 * 612) / 792) <= 1);
+  for (const n of [1, 2, 3]) await page.waitForFunction(thumbInked, n);
+  assert.equal(await page.locator("#minimap .thumb.current").getAttribute("data-page-number"), "1");
+
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test("minimap: a drag ends when the pointer capture is lost or a move comes without the button; hovering then does not scroll", async () => {
+  const pdf = path.join(tmp, "minimap-drag-end.pdf");
+  fs.writeFileSync(pdf, samplePdf(10));
+  const { page, errors } = await open(await serve(pdf));
+  await openMinimap(page, 10);
+  const scrollTop = () => page.evaluate(() => /** @type {HTMLElement} */ (document.getElementById("viewerContainer")).scrollTop);
+  /** A pointer event of the mouse (pointer 1) at the middle of thumbnail `n`, dispatched in the page. */
+  const fire = (/** @type {string} */ type, /** @type {number} */ n, /** @type {number} */ buttons) => page.evaluate(([t, k, b]) => {
+    const m = /** @type {HTMLElement} */ (document.getElementById("minimap"));
+    const r = /** @type {HTMLElement} */ (m.querySelector(`.thumb[data-page-number='${k}']`)).getBoundingClientRect();
+    m.dispatchEvent(new PointerEvent(/** @type {string} */ (t), {
+      pointerId: 1, pointerType: "mouse", isPrimary: true, button: -1, buttons: /** @type {number} */ (b), bubbles: true,
+      clientX: r.left + r.width / 2, clientY: r.top + r.height / 2,
+    }));
+  }, /** @type {[string, number, number]} */ ([type, n, buttons]));
+
+  for (const end of ["lostpointercapture", "move without the button"]) {
+    // a drag that starts on page 5 scrolls there
+    const t5 = await page.locator("#minimap .thumb[data-page-number='5']").boundingBox();
+    assert.ok(t5);
+    await page.mouse.move(t5.x + t5.width / 2, t5.y + t5.height / 2);
+    await page.mouse.down();
+    await page.waitForFunction(() => /** @type {HTMLElement} */ (document.getElementById("viewerContainer")).scrollTop > 0);
+    // then no pointerup reaches the minimap: its capture is taken away (a later move,
+    // even with the button down, is not the drag's), or the next move has no button
+    // pressed (that move does nothing either)
+    if (end === "lostpointercapture") await fire("lostpointercapture", 5, 0);
+    else await fire("pointermove", 3, 0);
+    const at = await scrollTop();
+    const mark = await count(page);
+    await fire("pointermove", 1, end === "lostpointercapture" ? 1 : 0);
+    await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+    assert.equal(await scrollTop(), at, `${end}: the pages did not scroll`);
+    assert.equal(await page.evaluate((s) => /** @type {any} */ (window).__posted.slice(s).filter((/** @type {any} */ m) => m.type === "page" && m.page === 1).length, mark), 0, end);
+    // release the real button over the pages, and go back to the top for the next round
+    await page.mouse.move(400, 400);
+    await page.mouse.up();
+    await page.evaluate(() => {
+      /** @type {HTMLElement} */ (document.getElementById("viewerContainer")).scrollTop = 0;
+    });
+    await page.waitForFunction(() => /** @type {HTMLElement} */ (document.getElementById("viewerContainer")).scrollTop === 0);
+  }
+
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test("minimap: an own render waiting for idle time when a reload drops the document does not start on the new one before its pages are set up", async () => {
+  const pdf = path.join(tmp, "minimap-swap.pdf");
+  fs.writeFileSync(pdf, samplePdf(5));
+  const { page, errors } = await open(await serve(pdf), manualIdle);
+  /** @type {string[]} */
+  const warnings = [];
+  page.on("console", (m) => {
+    if (m.type() === "warning") warnings.push(m.text());
+  });
+  await openMinimap(page, 5);
+  await page.waitForFunction(thumbInked, 1);
+  // past the quiet period the minimap asks for idle time for page 3, and waits
+  await page.waitForFunction(() => /** @type {any} */ (window).__idlePending(), null, { timeout: 5000 });
+
+  // Idle time comes right after the old document is dropped (setDocument(null) empties
+  // #viewer, and a mutation observer runs before pdf.js sets up the new pages): a
+  // render started then would ask the two-page document for page 3.
+  await page.evaluate(() => {
+    const viewer = /** @type {HTMLElement} */ (document.getElementById("viewer"));
+    const mo = new MutationObserver(() => {
+      if (viewer.querySelector(".page")) return;
+      mo.disconnect();
+      /** @type {any} */ (window).__idleInWindow = /** @type {any} */ (window).__idlePending();
+      /** @type {any} */ (window).__idle();
+    });
+    mo.observe(viewer, { childList: true });
+  });
+  fs.writeFileSync(pdf, samplePdf(2, "v2"));
+  const mark = await count(page);
+  await page.evaluate(() => /** @type {any} */ (window).__reload());
+  await posted(page, { type: "loaded", reload: true, pages: 2 }, mark);
+  await page.waitForFunction(() => document.querySelectorAll("#minimap .thumb").length === 2);
+  assert.equal(await page.evaluate(() => /** @type {any} */ (window).__idleInWindow), false, "the waiting render was dropped with the document");
+  const end = Date.now() + 5000;
+  while (!(await page.evaluate(thumbInked, 2))) {
+    assert.ok(Date.now() < end, "page 2 rendered");
+    await page.evaluate(() => /** @type {any} */ (window).__idle());
+    await page.waitForTimeout(50);
+  }
+  assert.deepEqual(warnings.filter((w) => w.startsWith("minimap:")), []);
+  assert.equal(await page.evaluate(() => /** @type {any} */ (window).__posted.filter((/** @type {any} */ m) => m.type === "error").length), 0);
+
   assert.deepEqual(errors, []);
   await page.close();
 });

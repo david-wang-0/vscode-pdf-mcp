@@ -261,3 +261,51 @@ body.finding #annotPanel { top: 64px; }
 }
 .synctexTip .synctexWord { font-weight: 700; text-decoration: underline; }
 body.synctex-hover .page, body.synctex-hover .textLayer, body.synctex-hover .textLayer span { cursor: pointer; }
+
+/* ---- minimap (minimap.mjs): page thumbnails, marks over them, the visible part ------- */
+
+#minimap {
+  position: absolute;
+  top: 32px;
+  bottom: 0;
+  right: 0;
+  width: 120px;
+  box-sizing: border-box;
+  padding: 2px 0 8px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: none;
+  background: var(--vscode-sideBar-background, var(--vscode-editorWidget-background, #f3f3f3));
+  border-left: 1px solid var(--vscode-panel-border, var(--vscode-editorWidget-border, #ccc));
+  z-index: 9;
+  user-select: none;
+}
+#minimap::-webkit-scrollbar { display: none; }
+#minimap[hidden] { display: none; }
+body.finding #minimap { top: 64px; }
+body.minimap-open #viewerContainer { right: 120px; }
+body.panel-open #minimap { right: 320px; }
+body.minimap-open.panel-open #viewerContainer { right: 440px; }
+#minimap .thumb {
+  position: relative;
+  width: 100px;
+  margin: 6px auto 0;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+}
+#minimap .thumb.current { outline: 1px solid var(--vscode-focusBorder, #0078d4); }
+#minimap .thumb canvas { display: block; width: 100%; height: 100%; }
+#minimap .overlay { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+#minimap .overlay > div { position: absolute; opacity: 0.85; pointer-events: none; }
+#minimap .overlay > .noteMark { width: 6px; height: 6px; border-radius: 1px; }
+#minimap .viewportBox {
+  position: absolute;
+  left: 0;
+  right: 0;
+  box-sizing: border-box;
+  background: var(--vscode-scrollbarSlider-background, rgba(121, 121, 121, 0.4));
+  border: 1px solid var(--vscode-scrollbarSlider-activeBackground, rgba(100, 100, 100, 0.6));
+  pointer-events: none;
+  z-index: 1;
+}

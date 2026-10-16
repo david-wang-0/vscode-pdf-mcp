@@ -16,11 +16,13 @@ const esc = (s) => s.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g,
 
 /**
  * @param {string[][]} pages lines of text per page
- * @param {{links?: {page: number, rect: number[], toPage: number}[], annots?: AnnotSpec[]}} [opts]
- *   1-based pages
+ * @param {{links?: {page: number, rect: number[], toPage: number}[], annots?: AnnotSpec[],
+ *   boxes?: ({size?: [number, number], rotate?: number} | undefined)[]}} [opts]
+ *   1-based pages; `boxes[i]`: page i's size in points (default 612 x 792; the text starts
+ *   an inch below its top) and /Rotate
  * @returns {Buffer & {annotIds?: number[]}} with `annotIds`: the object number of each annot
  */
-function makePdf(pages, { links = [], annots = [] } = {}) {
+function makePdf(pages, { links = [], annots = [], boxes = [] } = {}) {
   /** @type {string[]} */
   const objs = [];
   const n = pages.length;
@@ -55,12 +57,14 @@ function makePdf(pages, { links = [], annots = [] } = {}) {
   objs[2] = `<< /Type /Pages /Kids [${pages.map((_, i) => `${pageId(i)} 0 R`).join(" ")}] /Count ${n} >>`;
   objs[3] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>";
   pages.forEach((lines, i) => {
-    const ops = ["BT", "/F1 12 Tf", "14 TL", "72 720 Td"];
+    const [w, h] = boxes[i]?.size || [612, 792];
+    const rotate = boxes[i]?.rotate;
+    const ops = ["BT", "/F1 12 Tf", "14 TL", `72 ${h - 72} Td`];
     for (const line of lines) ops.push(`(${esc(line)}) Tj T*`);
     ops.push("ET");
     const stream = ops.join("\n");
     const annots = annotsByPage.get(i + 1);
-    objs[pageId(i)] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ` +
+    objs[pageId(i)] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${w} ${h}] ` + (rotate ? `/Rotate ${rotate} ` : "") +
       `/Resources << /Font << /F1 3 0 R >> >> /Contents ${pageId(i) + 1} 0 R` +
       (annots ? ` /Annots [${annots.map((a) => `${a} 0 R`).join(" ")}]` : "") + " >>";
     objs[pageId(i) + 1] = `<< /Length ${Buffer.byteLength(stream, "latin1")} >>\nstream\n${stream}\nendstream`;

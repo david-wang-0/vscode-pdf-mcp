@@ -201,8 +201,10 @@ The extension logs to the output channel *PDF viewer (vscode-pdf-mcp)*.
   (opened in your browser through `vscode.env.openExternal`). Notes and threads show in the
   viewer's own tip and popover (see [Marking](#marking)), not in pdf.js's popups.
 - Toolbar: page number / total, zoom out, zoom in, fit width (the default; it keeps fitting
-  when the editor is resized), the mark tools, *Annotations* (the side panel), *Open in
-  Okular*. Ctrl+F opens a find bar (Enter, Shift+Enter, Escape).
+  when the editor is resized), the mark tools, *Minimap* (page thumbnails with your marks
+  as coloured ticks; click or drag in it to scroll; on by default, and remembered),
+  *Annotations* (the side panel), *Open in Okular*. Ctrl+F opens a find bar (Enter,
+  Shift+Enter, Escape).
 - Chrome follows the VS Code theme; pages stay white.
 - The file is read through `vscode.workspace.fs` and posted to the webview, so PDFs outside
   the workspace work.
@@ -213,6 +215,39 @@ The extension logs to the output channel *PDF viewer (vscode-pdf-mcp)*.
   (caught mid-write) keeps the old render, and the next change is retried. A tab in the
   background parses the new file at once (so its page count is current) and shows it when
   you come back to it.
+
+### Minimap
+
+A column of page thumbnails to the right of the pages, 100 px wide, each in its page's
+aspect ratio, with a translucent box over the part of the document on screen. It is on
+by default; the toolbar's *Minimap* hides it, and the choice is remembered per tab. A click
+scrolls the pages so the point you clicked is in the middle of the view (keeping the
+place within the page); a drag keeps doing so. In a long document the minimap scrolls
+along with the pages, so the box stays in view; the wheel scrolls it on its own.
+
+- Thumbnails are copied from the pages the viewer renders: each page drawn in the main
+  view is scaled down into its thumbnail, at no rendering cost. Only pages the main view
+  has not shown are rendered on their own, lazily (those in or near the minimap's visible
+  part), one at a time, and only when the viewer is idle: when pdf.js's rendering queue
+  has nothing of its own left to draw, not within 250 ms of a scroll or zoom (one under
+  way is cancelled when the pages move), at the browser's idle time. A hidden tab renders
+  none. The box's geometry is measured once per layout, so a scroll frame reads only
+  scroll positions.
+- Your marks are drawn over the thumbnails from the viewer's annotation model, one
+  coloured rect per marked line and a small square for a note, so they show as soon as
+  the model has them. A thumbnail rendered on its own leaves the annotations out; one
+  copied from the page has them in its image too, under the rects. Replies are not
+  drawn, and neither are the marks of a rotated page.
+- Every mark rewrites the file and reloads it. A reload whose pages have the same count
+  and sizes keeps the thumbnails on screen: the pages the main view draws again refresh
+  theirs, the others are re-rendered lazily, each replaced only when its new image is
+  ready; other changes make the thumbnails anew.
+- In a long document, a second after the minimap stops moving, thumbnails more than 40
+  pages from the part in or near view are emptied (except the current page's), so a book
+  holds about the visible part and 40 pages each side (a thumbnail is about 52 KB, or
+  210 KB on a high-density screen) rather than every page shown so far. They come back
+  the same way as before when they are near view again. A paper of up to 40 pages never
+  loses one.
 
 ## Marking
 
@@ -520,6 +555,11 @@ restart), `extension/marks.js` (requests, per-document write queue and undo stac
 `media/annotate.mjs` (the UI), `media/marking.mjs` and `media/keys.mjs` (palette,
 geometry, threads, shortcuts; shared with the unit tests).
 
+Minimap code: `media/minimap.mjs` (thumbnails, their render queue, the marks over them,
+the box, click and drag; it takes the marks from annotate.mjs's `annotationsrebuilt`
+event), `media/minimaplayout.mjs` (the mapping between the pages' scroll position and the
+minimap, without DOM; shared with the unit tests).
+
 ## Gotchas
 
 - **One window per pid**: the state is per extension host. Remote windows (SSH, WSL,
@@ -580,8 +620,9 @@ installed from, as with `uv tool install -e`, else `kpsewhich`). With pdf-reader
 installed that way, no variable is needed.
 
 - `npm test` runs `test/*.test.js`: one or more tests per contract clause (named
-  `C<N>: ...`), the state store, the socket framing, selection normalisation, and the MCP
-  server over stdio with the SDK client. They use a temporary runtime directory with fake
+  `C<N>: ...`), the state store, the socket framing, selection normalisation, the
+  minimap's mapping between scroll position and thumbnails (pages of different heights,
+  clamping, round trip), and the MCP server over stdio with the SDK client. They use a temporary runtime directory with fake
   state files, a fake extension socket built from `extension/ipc.js`, and fake
   `wl-paste`/`xclip`/`xsel` scripts on a temporary `PATH`. The marking units (service
   client, request checks, ownership, undo stack and its xref remapping, palette, geometry,
@@ -614,7 +655,15 @@ installed that way, no variable is needed.
   thread and replies, edit/restyle/delete only on own marks, the side panel, and SyncTeX
   with a mocked extension: the Ctrl+hover underline and tip, Ctrl+click (also on a link)
   with the clicked word, the forward-search flash of a line and of a word (a repeated one,
-  a hyphenated one, one in the next lines' boxes), and Ctrl+wheel zoom with SyncTeX on.
+  a hyphenated one, one in the next lines' boxes), and Ctrl+wheel zoom with SyncTeX on,
+  and the minimap: thumbnails in each page's aspect ratio that render, its state kept
+  next to the marking preferences, the box following goto, scrolling and zoom, click and
+  drag, a reload that keeps the thumbnails and re-renders them, marks drawn as coloured
+  rects (replies left out), a 60-page document whose minimap scrolls with the pages and
+  renders only the thumbnails near view, the emptying of thumbnails far from view (and
+  their return), a saved "closed" state that starts it closed, and, with the browser's
+  idle callbacks stubbed out, thumbnails copied from the pages the main view draws (also
+  after a reload) while a page it has not drawn stays blank.
   With a Python with `pymupdf` (see above) it also checks PyMuPDF-written underlines and
   notes (`scripts/make-annotated-pdf.py`) and links.
 - `npm run test:integration` downloads VS Code into `.vscode-test/` with

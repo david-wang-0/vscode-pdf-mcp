@@ -8,7 +8,9 @@
  *
  * In the page: `window.__posted` holds every message the viewer sent to the "extension";
  * `window.__send(msg)` delivers a message to the viewer; `window.__reload()` re-sends the
- * PDF from disk as an on-disk reload would.
+ * PDF from disk as an on-disk reload would; `window.__state` is the webview state
+ * (`getState`/`setState`), empty at the start unless a test seeds it before the page's
+ * scripts run (Playwright's addInitScript).
  */
 "use strict";
 
@@ -39,12 +41,14 @@ const server = http.createServer((req, res) => {
     const n = nonce();
     const mock = `<script nonce="${n}">
 window.__posted = [];
+window.__state = window.__state || {};
 window.acquireVsCodeApi = () => ({
   postMessage(m) {
     window.__posted.push(m);
     if (m && m.type === "ready") window.__reload(false);
   },
-  getState() {}, setState() {},
+  getState() { return window.__state; },
+  setState(s) { window.__state = s; },
 });
 window.__send = (data) => window.dispatchEvent(new MessageEvent("message", { data }));
 window.__reload = async (reload = true) => {

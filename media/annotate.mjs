@@ -12,6 +12,7 @@
  * xref, note?, color?, style?}, delete {reqId, xref}, undo {reqId}, prefs {style, color}.
  * Messages from it: marking {enabled, reason, author, keys, style?, color?}, annotations
  * {list}, editResult {reqId, ok, result | error}.
+ * Events it dispatches: annotationsrebuilt {anns} (after each rebuild of the model).
  */
 
 import {
@@ -187,6 +188,8 @@ export function setupMarking({ pdfViewer, eventBus, container, post, getDocument
     byPage = new Map();
     for (const a of out) byPage.set(a.page, [...(byPage.get(a.page) || []), a]);
     refreshViews();
+    // the minimap (minimap.mjs) draws the marks over its thumbnails from the model
+    eventBus.dispatch("annotationsrebuilt", { source: null, anns });
   }
   /** @param {Ann} a */
   const textOf = (a) => (a.xref != null && serviceText.get(a.xref)) || "";

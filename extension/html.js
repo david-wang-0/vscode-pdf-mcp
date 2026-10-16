@@ -57,7 +57,7 @@ function renderHtml({ cspSource, nonce: n, uri, extraHead = "" }) {
 <link rel="stylesheet" href="${urls.pdfViewerCss}">
 <link rel="stylesheet" href="${urls.viewerCss}">
 ${extraHead}</head>
-<body data-config="${escapeAttr(JSON.stringify(urls))}">
+<body class="minimap-open" data-config="${escapeAttr(JSON.stringify(urls))}">
 <div id="toolbar" role="toolbar">
   <span class="group">
     <input id="pageNumber" type="text" inputmode="numeric" value="" size="4" aria-label="Page" title="Page">
@@ -79,6 +79,7 @@ ${extraHead}</head>
     <button id="undo" title="Undo" aria-label="Undo" disabled>Undo</button>
   </span>
   <span class="spacer"></span>
+  <button id="minimapToggle" aria-pressed="true" title="Show the minimap">Minimap</button>
   <button id="panelToggle" aria-pressed="false" title="Show the annotations">Annotations</button>
   <button id="openExternal" title="Open this PDF in Okular">Open in Okular</button>
 </div>
@@ -91,6 +92,7 @@ ${extraHead}</head>
   <button id="findClose" title="Close (Escape)" aria-label="Close">&times;</button>
 </div>
 <div id="viewerContainer" tabindex="0"><div id="viewer" class="pdfViewer"></div></div>
+<aside id="minimap" class="vpdf-ui" aria-label="Minimap"></aside>
 <aside id="annotPanel" class="vpdf-ui" aria-label="Annotations" hidden></aside>
 <div id="message" hidden></div>
 <div id="status" role="status" aria-live="polite" hidden></div>
