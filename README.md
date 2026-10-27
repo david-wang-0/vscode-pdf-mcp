@@ -166,9 +166,9 @@ Code's `settings.json`:
 This displaces `pdf-external-open` for every open path (explorer, Ctrl+click, links). LaTeX
 Workshop's own tab viewer is unaffected: it does not go through editor associations.
 
-**Open in Okular**: the editor-title action (also *PDF: Open in
-Okular* in the command palette) hand the file to `pdf-external-open` when that extension is
-installed (`vscode.openWith(uri, 'pdfExternalOpen.editor')`), and otherwise run the
+**Open in Okular**: *PDF: Open in Okular* in the command palette (there is no button for it
+above the editor or in the toolbar) hands the file to `pdf-external-open` when that extension is
+installed (`vscode.openWith(uri, 'pdfExternalOpen.editor')`), and otherwise runs the
 `vscodePdfMcp.externalViewer` command with the file.
 
 ## Settings
