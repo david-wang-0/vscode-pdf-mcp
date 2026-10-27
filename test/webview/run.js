@@ -45,9 +45,12 @@ function serve(pdf) {
   });
 }
 
-/** @param {string} url @param {() => void} [init] runs in the page before its own scripts */
-async function open(url, init) {
-  const page = await browser.newPage({ viewport: { width: 1000, height: 800 } });
+/**
+ * @param {string} url @param {() => void} [init] runs in the page before its own scripts
+ * @param {import("playwright-core").Browser} [b] another browser than the shared one
+ */
+async function open(url, init, b = browser) {
+  const page = await b.newPage({ viewport: { width: 1000, height: 800 } });
   /** @type {string[]} */
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
@@ -481,6 +484,154 @@ test("toolbar: a sticky mark tool marks each selection at once; colour picker; m
   assert.equal(n.color, "pink");
   assert.ok(Math.abs(n.point[0] - 30) < 1 && Math.abs(n.point[1] - (792 - 100)) < 1, `point ${n.point}`);
   assert.equal(await page.getAttribute("#markTools .tool[data-tool='note']", "aria-pressed"), "true", "sticky");
+
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test("toolbar: Annotations, then the minimap icon at the right end; no Open in Okular; the icon is a button named Minimap that toggles", async () => {
+  const pdf = path.join(tmp, "toolbar-order.pdf");
+  fs.writeFileSync(pdf, samplePdf(2));
+  const { page, errors } = await open(await serve(pdf));
+  await enableMarking(page);
+
+  // the toolbar's buttons in order: the last two are #panelToggle and #minimapToggle
+  const ids = await page.locator("#toolbar button").evaluateAll((els) => els.map((e) => e.id));
+  assert.deepEqual(ids.slice(-2), ["panelToggle", "minimapToggle"]);
+  assert.equal(await page.evaluate(() => document.getElementById("toolbar")?.lastElementChild?.id), "minimapToggle");
+  assert.equal(await page.locator("#openExternal").count(), 0);
+  assert.equal(await page.getByRole("button", { name: /okular/i }).count(), 0);
+
+  // an icon with an accessible name and a tooltip, no visible text
+  const toggle = page.getByRole("button", { name: "Minimap", exact: true });
+  assert.equal(await toggle.count(), 1);
+  assert.equal(await toggle.getAttribute("id"), "minimapToggle");
+  assert.equal(await toggle.getAttribute("title"), "Show the minimap");
+  assert.equal((await toggle.innerText()).trim(), "");
+  const icon = page.locator("#minimapToggle svg.icon");
+  assert.equal(await icon.count(), 1);
+  assert.equal(await icon.getAttribute("aria-hidden"), "true");
+  const ib = await icon.boundingBox();
+  assert.ok(ib && ib.width === 16 && ib.height === 16, `icon box ${JSON.stringify(ib)}`);
+  // as tall as the labelled buttons next to it
+  const heights = await page.locator("#panelToggle, #minimapToggle").evaluateAll((els) => els.map((e) => e.getBoundingClientRect().height));
+  assert.ok(Math.abs(heights[0] - heights[1]) <= 1, `heights ${heights}`);
+
+  // a click on the icon itself reaches the button: aria-pressed toggles, both ways
+  assert.equal(await toggle.getAttribute("aria-pressed"), "true");
+  await page.mouse.click(ib.x + ib.width / 2, ib.y + ib.height / 2);
+  assert.equal(await toggle.getAttribute("aria-pressed"), "false");
+  assert.ok(await page.locator("#minimap").isHidden());
+  await toggle.click();
+  assert.equal(await toggle.getAttribute("aria-pressed"), "true");
+  assert.ok(await page.locator("#minimap").isVisible());
+
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test("toolbar: too narrow, it scrolls sideways with a plain wheel (not Ctrl+wheel) and keeps every label whole on one line; wide enough, the wheel leaves it alone", async (ctx) => {
+  const pdf = path.join(tmp, "toolbar-narrow.pdf");
+  fs.writeFileSync(pdf, samplePdf(2));
+  // Playwright's headless Chromium hides all scrollbars; this one draws them, as VS Code does
+  const scrollbars = await chromium.launch({ headless: true, executablePath: process.env.CHROMIUM || undefined, ignoreDefaultArgs: ["--hide-scrollbars"] });
+  ctx.after(() => scrollbars.close());
+  const { page, errors } = await open(await serve(pdf), undefined, scrollbars);
+  await enableMarking(page);
+  /** Each toolbar button's box and whether its content fits it. */
+  const measure = () => page.locator("#toolbar button").evaluateAll((els) => els.map((e) => {
+    const b = /** @type {HTMLElement} */ (e);
+    const r = b.getBoundingClientRect();
+    return { id: b.id || b.dataset.tool, width: r.width, height: r.height, scrollWidth: b.scrollWidth, clientWidth: b.clientWidth };
+  }));
+  await page.setViewportSize({ width: 1400, height: 800 });
+  const wide = await measure();
+  await page.setViewportSize({ width: 600, height: 800 });
+  const bar = () => page.evaluate(() => {
+    const t = /** @type {HTMLElement} */ (document.getElementById("toolbar"));
+    return { scrollLeft: t.scrollLeft, scrollWidth: t.scrollWidth, clientWidth: t.clientWidth, clientHeight: t.clientHeight,
+      height: t.getBoundingClientRect().height, border: parseFloat(getComputedStyle(t).borderBottomWidth) };
+  });
+  await page.waitForFunction(() => {
+    const t = /** @type {HTMLElement} */ (document.getElementById("toolbar"));
+    return t.scrollWidth > t.clientWidth;
+  });
+  const narrow = await bar();
+  // still 32 px, and no scrollbar takes any of it (only the bottom border)
+  assert.equal(narrow.height, 32);
+  assert.equal(narrow.clientHeight, narrow.height - narrow.border);
+
+  // every button keeps the box it has with room to spare (no wrap onto a second line, no
+  // squeeze) inside the bar's padding, and its whole label shows (no ellipsis)
+  const buttons = await measure();
+  assert.deepEqual(buttons.map((b) => b.id), wide.map((b) => b.id));
+  buttons.forEach((b, i) => {
+    assert.ok(Math.abs(b.width - wide[i].width) < 0.5 && Math.abs(b.height - wide[i].height) < 0.5,
+      `${b.id}: ${b.width}x${b.height}, with room ${wide[i].width}x${wide[i].height}`);
+    assert.ok(b.height <= 26, `${b.id}: ${b.height} px high`);
+    assert.ok(b.scrollWidth <= b.clientWidth, `${b.id}: label cut (${b.scrollWidth} > ${b.clientWidth})`);
+  });
+  // the minimap toggle starts out of view
+  const right = async () => {
+    const t = await page.locator("#toolbar").boundingBox();
+    const m = await page.locator("#minimapToggle").boundingBox();
+    assert.ok(t && m);
+    return m.x + m.width <= t.x + t.width;
+  };
+  assert.equal(await right(), false);
+
+  // what the toolbar's handler did with each wheel event: seen after it, in the bubble phase
+  await page.evaluate(() => {
+    const w = /** @type {any} */ (window);
+    w.__wheels = [];
+    window.addEventListener("wheel", (e) => w.__wheels.push({ ctrl: e.ctrlKey, prevented: e.defaultPrevented }), { passive: true });
+  });
+  const wheels = () => page.evaluate(() => /** @type {any} */ (window).__wheels);
+  const t = await page.locator("#toolbar").boundingBox();
+  assert.ok(t);
+  await page.mouse.move(t.x + 200, t.y + t.height / 2);
+  const zoom = await page.textContent("#zoomValue");
+
+  // Ctrl+wheel over the toolbar: neither scrolls it nor zooms; the plain wheel after it
+  // scrolls it by exactly its own delta
+  await page.keyboard.down("Control");
+  await page.mouse.wheel(0, 40);
+  await page.keyboard.up("Control");
+  await page.mouse.wheel(0, 40);
+  await page.waitForFunction(() => /** @type {any} */ (window).__wheels.length === 2);
+  assert.deepEqual(await wheels(), [{ ctrl: true, prevented: false }, { ctrl: false, prevented: true }]);
+  await page.waitForFunction(() => /** @type {HTMLElement} */ (document.getElementById("toolbar")).scrollLeft > 0);
+  assert.equal((await bar()).scrollLeft, 40);
+  assert.equal(await page.textContent("#zoomValue"), zoom);
+
+  // further plain wheels reach the end, where the minimap toggle is in view and clickable
+  await page.mouse.wheel(0, 2000);
+  await page.waitForFunction(() => {
+    const t = /** @type {HTMLElement} */ (document.getElementById("toolbar"));
+    return t.scrollLeft >= t.scrollWidth - t.clientWidth - 1;
+  });
+  assert.equal(await right(), true);
+  const m = await page.locator("#minimapToggle").boundingBox();
+  assert.ok(m);
+  await page.mouse.click(m.x + m.width / 2, m.y + m.height / 2);
+  assert.equal(await page.getAttribute("#minimapToggle", "aria-pressed"), "false");
+  // and back with the wheel the other way
+  await page.mouse.move(t.x + 200, t.y + t.height / 2);
+  await page.mouse.wheel(0, -2000);
+  await page.waitForFunction(() => /** @type {HTMLElement} */ (document.getElementById("toolbar")).scrollLeft === 0);
+
+  // wide enough: nothing to scroll, the wheel over the toolbar is left alone
+  await page.setViewportSize({ width: 1400, height: 800 });
+  await page.waitForFunction(() => {
+    const t = /** @type {HTMLElement} */ (document.getElementById("toolbar"));
+    return t.scrollWidth <= t.clientWidth;
+  });
+  await page.evaluate(() => { /** @type {any} */ (window).__wheels = []; });
+  await page.mouse.wheel(0, 200);
+  await page.waitForFunction(() => /** @type {any} */ (window).__wheels.length === 1);
+  assert.deepEqual(await wheels(), [{ ctrl: false, prevented: false }]);
+  assert.equal((await bar()).scrollLeft, 0);
+  assert.equal(await right(), true);
 
   assert.deepEqual(errors, []);
   await page.close();

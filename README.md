@@ -650,7 +650,10 @@ installed that way, no variable is needed.
 - `npm run test:webview` serves the webview through `scripts/serve-webview.js` (the same
   HTML and CSP as in VS Code, with a mocked `acquireVsCodeApi`) and drives it with
   `playwright-core`: rendering, mouse selection, goto, reload in place, a half-written
-  file, find, toolbar, and marking with a mocked extension: the mini-bar and the `mark`
+  file, find, the toolbar (Annotations then the minimap icon at its right end, no *Open in
+  Okular*; too narrow, it scrolls sideways with a plain wheel but not Ctrl+wheel and keeps
+  every label whole, in a Chromium that draws scrollbars, so none takes height), and
+  marking with a mocked extension: the mini-bar and the `mark`
   request with PDF-space rects, sticky tools, the margin-note click, keys, the popover
   thread and replies, edit/restyle/delete only on own marks, the side panel, and SyncTeX
   with a mocked extension: the Ctrl+hover underline and tip, Ctrl+click (also on a link)
@@ -679,7 +682,9 @@ installed that way, no variable is needed.
   `VSCODE_VERSION=1.90.0` tests the oldest supported VS Code. It opens generated
   PDFs, checks the state file, goto over the socket (including opening a closed file and
   `cannot open`), replace-by-rename reloads of a background tab,
-  the hook, and *Open in Okular* against a fake command; with `pdflatex`, a LaTeX project
+  the hook, *Open in Okular* against a fake command (in the command palette only, not
+  above the editor), the toolbar in the webview over CDP (no *Open in Okular* button, the
+  minimap icon toggles with a real click); with `pdflatex`, a LaTeX project
   compiled into the workspace: Ctrl+click with the real mouse opens the `\input` file at
   the line, *SyncTeX: Show in PDF* and `vscode-pdf-mcp-open --tex` scroll the PDF, both
   down to the word (the flash on the word's text-layer box, the cursor on the clicked

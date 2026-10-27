@@ -2,7 +2,8 @@
 /**
  * Runs inside the VS Code extension host (see run.js). Drives the real custom editor and
  * checks the state file, goto over the socket, reload on disk change, the hook and
- * "Open in Okular" (against a fake command). Then, with pdf-reader-writer-mcp's edit
+ * "Open in Okular" (against a fake command; a command-palette command only), and the
+ * webview's toolbar over CDP. Then, with pdf-reader-writer-mcp's edit
  * service, marking with real mouse and keyboard input over CDP: mark, reply, edit,
  * delete, undo, keys kept from VS Code, and concurrent writes with the MCP server.
  * With pdflatex, SyncTeX: Ctrl+click opens the source, forward search from the command
@@ -175,6 +176,13 @@ async function runParts() {
   await vscode.commands.executeCommand("vscodePdfMcp.openExternal");
   const log = path.join(tmp, "fake-okular.log");
   await waitFor(() => fs.existsSync(log) && fs.readFileSync(log, "utf8") === `${other}\n`, "fake viewer called with the PDF");
+  //    It is a command-palette command only: nothing above the editor (editor/title) as
+  //    VS Code loaded the manifest, and no button in the webview's toolbar (below).
+  assert.ok((await vscode.commands.getCommands(true)).includes("vscodePdfMcp.openExternal"));
+  const menus = ext.packageJSON.contributes.menus;
+  assert.ok(menus.commandPalette.some((/** @type {any} */ m) => m.command === "vscodePdfMcp.openExternal"));
+  assert.deepEqual(Object.keys(menus).filter((k) => k !== "commandPalette" && menus[k].some((/** @type {any} */ m) => m.command === "vscodePdfMcp.openExternal")), []);
+  await toolbar();
 
   // 8. Closing the tabs empties the state.
   await vscode.commands.executeCommand("workbench.action.closeAllEditors");
@@ -193,6 +201,47 @@ async function runParts() {
   await sourceSync(ext);
   await vscode.commands.executeCommand("workbench.action.closeAllEditors");
   await waitFor(() => backend.readStates(dir).find((s) => s.pid === process.pid)?.panels.length === 0, "no panels left");
+}
+
+// ---- toolbar -------------------------------------------------------------------------
+
+/**
+ * The toolbar in the real webview of other.pdf (2 pages), over CDP: no Open in Okular
+ * button, Annotations then the minimap icon at the right end, and the icon toggles the
+ * minimap with a real click (twice, so the tab is left as it was).
+ */
+async function toolbar() {
+  const { chromium } = require("playwright-core");
+  const browser = await chromium.connectOverCDP(`http://127.0.0.1:${process.env.VPDF_CDP_PORT}`);
+  try {
+    const found = await webviewFrame(browser, "/ 2");
+    const chrome = Number((process.versions.chrome || "999").split(".")[0]);
+    if (!found) {
+      if (chrome < 130) {
+        skipped("toolbar in the webview", `the webview is not reachable over CDP here (VS Code ${vscode.version}, Chromium ${chrome})`);
+        return;
+      }
+      throw new Error("no webview frame for other.pdf");
+    }
+    const { page, frame: f } = found;
+    assert.equal(await f.locator("#openExternal").count(), 0);
+    const ids = await f.locator("#toolbar button").evaluateAll((els) => els.map((e) => e.id));
+    assert.deepEqual(ids.slice(-2), ["panelToggle", "minimapToggle"]);
+    const toggle = f.locator("#minimapToggle");
+    assert.equal(await toggle.getAttribute("aria-label"), "Minimap");
+    assert.equal(await toggle.getAttribute("aria-pressed"), "true");
+    await toggle.scrollIntoViewIfNeeded();
+    for (const want of ["false", "true"]) {
+      const b = await f.locator("#minimapToggle svg.icon").boundingBox();
+      assert.ok(b, "minimap icon on screen");
+      await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
+      await f.waitForFunction((w) => document.getElementById("minimapToggle")?.getAttribute("aria-pressed") === w, want);
+      assert.equal(await f.locator("#minimap").isVisible(), want === "true");
+    }
+    ran("toolbar in the webview");
+  } finally {
+    await browser.close().catch(() => {});
+  }
 }
 
 // ---- marking -----------------------------------------------------------------------

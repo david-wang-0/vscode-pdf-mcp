@@ -1,7 +1,8 @@
 // @ts-check
 /**
  * The manifest: SyncTeX: Show in PDF is in the right-click menu of the
- * same editors whose command palette has it, and the executables are registered.
+ * same editors whose command palette has it, Open in Okular is in the command palette
+ * only, and the executables are registered.
  */
 "use strict";
 
@@ -20,6 +21,17 @@ test("SyncTeX: Show in PDF is in a .tex editor's right-click menu, as in its pal
   assert.match(context.group, /^navigation/);
   // the context menu shows the title alone, so it must read on its own
   assert.equal(commands.find((/** @type {any} */ c) => c.command === "vscodePdfMcp.synctexForward").title, "Show in PDF");
+});
+
+test("Open in Okular is a command-palette command only: no action above the editor, no icon", () => {
+  const { menus, commands } = pkg.contributes;
+  const cmd = commands.find((/** @type {any} */ c) => c.command === "vscodePdfMcp.openExternal");
+  assert.deepEqual(cmd, { command: "vscodePdfMcp.openExternal", title: "Open in Okular", category: "PDF" });
+  assert.ok(menus.commandPalette.some((/** @type {any} */ m) => m.command === "vscodePdfMcp.openExternal"));
+  for (const [where, items] of Object.entries(menus)) {
+    if (where === "commandPalette") continue;
+    assert.ok(!(/** @type {any[]} */ (items)).some((m) => m.command === "vscodePdfMcp.openExternal"), `not in ${where}`);
+  }
 });
 
 test("bin: vscode-pdf-mcp, vscode-pdf-mcp-hook and vscode-pdf-mcp-open are registered, executable Node scripts", () => {
