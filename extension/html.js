@@ -79,8 +79,8 @@ ${extraHead}</head>
     <button id="undo" title="Undo" aria-label="Undo" disabled>Undo</button>
   </span>
   <span class="spacer"></span>
-  <button id="minimapToggle" aria-pressed="true" title="Show the minimap">Minimap</button>
   <button id="panelToggle" aria-pressed="false" title="Show the annotations">Annotations</button>
+  <button id="minimapToggle" aria-pressed="true" title="Show the minimap" aria-label="Minimap"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="1" fill="none" stroke="currentColor"/><path d="M10 3v10" stroke="currentColor"/><rect x="10.5" y="5" width="3.5" height="4" fill="currentColor" opacity="0.35"/><path d="M11 4.5h2.5M11 6h2M11 7.5h2.5M11 9h1.5M11 10.5h2.5M11 12h2" stroke="currentColor" stroke-width="0.8"/></svg></button>
 </div>
 <div id="colorMenu" class="vpdf-ui menu" role="menu" aria-label="Colour" hidden></div>
 <div id="findbar" hidden>

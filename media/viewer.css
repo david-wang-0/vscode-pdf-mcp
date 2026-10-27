@@ -102,6 +102,7 @@ body.tool-note .page, body.tool-note .textLayer, body.tool-note .textLayer span 
 .glyph.g-squiggly { text-decoration: underline wavy var(--mark); text-underline-offset: 2px; }
 .glyph.g-strikeout { text-decoration: line-through 2px var(--mark); }
 #toolbar .glyph { --mark: currentColor; }
+#toolbar .icon { display: block; width: 16px; height: 16px; }
 #toolbar .glyph.g-highlight { --mark: #ffe64d; }
 .swatch {
   display: inline-block;

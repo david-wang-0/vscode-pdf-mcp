@@ -201,10 +201,10 @@ The extension logs to the output channel *PDF viewer (vscode-pdf-mcp)*.
   (opened in your browser through `vscode.env.openExternal`). Notes and threads show in the
   viewer's own tip and popover (see [Marking](#marking)), not in pdf.js's popups.
 - Toolbar: page number / total, zoom out, zoom in, fit width (the default; it keeps fitting
-  when the editor is resized), the mark tools, *Minimap* (page thumbnails with your marks
-  as coloured ticks; click or drag in it to scroll; on by default, and remembered),
-  *Annotations* (the side panel). Ctrl+F opens a find bar (Enter,
-  Shift+Enter, Escape).
+  when the editor is resized), the mark tools, *Annotations* (the side panel), the minimap
+  icon (page thumbnails with your marks as coloured ticks; click or drag in it to scroll; on
+  by default, and remembered). When the editor is too narrow for the toolbar, it scrolls
+  sideways (wheel or touchpad). Ctrl+F opens a find bar (Enter, Shift+Enter, Escape).
 - Chrome follows the VS Code theme; pages stay white.
 - The file is read through `vscode.workspace.fs` and posted to the webview, so PDFs outside
   the workspace work.
