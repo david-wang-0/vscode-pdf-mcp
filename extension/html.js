@@ -81,7 +81,6 @@ ${extraHead}</head>
   <span class="spacer"></span>
   <button id="minimapToggle" aria-pressed="true" title="Show the minimap">Minimap</button>
   <button id="panelToggle" aria-pressed="false" title="Show the annotations">Annotations</button>
-  <button id="openExternal" title="Open this PDF in Okular">Open in Okular</button>
 </div>
 <div id="colorMenu" class="vpdf-ui menu" role="menu" aria-label="Colour" hidden></div>
 <div id="findbar" hidden>

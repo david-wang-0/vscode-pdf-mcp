@@ -166,7 +166,7 @@ Code's `settings.json`:
 This displaces `pdf-external-open` for every open path (explorer, Ctrl+click, links). LaTeX
 Workshop's own tab viewer is unaffected: it does not go through editor associations.
 
-**Open in Okular**: the toolbar button and the editor-title action (also *PDF: Open in
+**Open in Okular**: the editor-title action (also *PDF: Open in
 Okular* in the command palette) hand the file to `pdf-external-open` when that extension is
 installed (`vscode.openWith(uri, 'pdfExternalOpen.editor')`), and otherwise run the
 `vscodePdfMcp.externalViewer` command with the file.
@@ -203,7 +203,7 @@ The extension logs to the output channel *PDF viewer (vscode-pdf-mcp)*.
 - Toolbar: page number / total, zoom out, zoom in, fit width (the default; it keeps fitting
   when the editor is resized), the mark tools, *Minimap* (page thumbnails with your marks
   as coloured ticks; click or drag in it to scroll; on by default, and remembered),
-  *Annotations* (the side panel), *Open in Okular*. Ctrl+F opens a find bar (Enter,
+  *Annotations* (the side panel). Ctrl+F opens a find bar (Enter,
   Shift+Enter, Escape).
 - Chrome follows the VS Code theme; pages stay white.
 - The file is read through `vscode.workspace.fs` and posted to the webview, so PDFs outside
@@ -525,7 +525,7 @@ The hook reads only the state files: no socket, no pdf.js, a few milliseconds.
 Webview to extension messages: `ready`, `loaded {pages, page, reload}`,
 `loadError {message, reload}`, `page {page}`, `selection {selection}` (with `parts: [{page,
 rects}]`, the selection's rects in SyncTeX space, when the PDF has SyncTeX data),
-`gotoDone {reqId, page}`, `openLink {url}`, `openExternalViewer`, `error {message}`,
+`gotoDone {reqId, page}`, `openLink {url}`, `error {message}`,
 for SyncTeX `synctexHover {reqId, page, x, y, anchor?}` and `synctexEdit {page, x, y,
 anchor?}` (`anchor`: `{before, words, after}`, the normalised word under the pointer and
 up to six words of context each side, from the text layer), and

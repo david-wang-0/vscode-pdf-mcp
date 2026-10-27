@@ -185,11 +185,6 @@ test("webview renders, selects, follows goto, reloads in place and finds", async
   await page.press("#pageNumber", "Enter");
   await posted(page, { type: "page", page: 5 });
 
-  // Open in Okular button
-  mark = await count(page);
-  await page.click("#openExternal");
-  await posted(page, { type: "openExternalViewer" }, mark);
-
   assert.deepEqual(errors.filter((e) => !/Warning/.test(e)), []);
   await page.close();
 });

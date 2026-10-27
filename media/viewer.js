@@ -8,8 +8,7 @@
  * Messages to the extension: ready, loaded {pages, page, reload}, loadError {message,
  * reload}, page {page}, selection {selection: {text, page, parts?} | null} (`parts`: the
  * selection's SyncTeX rects per page, when the PDF has SyncTeX data), gotoDone {reqId,
- * page}, openLink {url}, openExternalViewer, and the messages of annotate.mjs and
- * synctex.mjs.
+ * page}, openLink {url}, and the messages of annotate.mjs and synctex.mjs.
  * Messages from the extension: load {data, reload}, goto {page, reqId}, synctexShow
  * {page, rects, reqId} (a forward search: goto plus a flash; answered with gotoDone),
  * visibility {visible}, and the messages of annotate.mjs and synctex.mjs.
@@ -311,7 +310,6 @@ container.addEventListener("wheel", (e) => {
 $("fitWidth").addEventListener("click", () => {
   pdfViewer.currentScaleValue = "page-width";
 });
-$("openExternal").addEventListener("click", () => post({ type: "openExternalViewer" }));
 
 // External links go through the extension (vscode.env.openExternal); internal links
 // (citations, sections) are handled by pdf.js's link service.

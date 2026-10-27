@@ -211,9 +211,6 @@ class PdfPanel {
       case "error":
         trace(`webview ${this.path}: ${m.message}`);
         break;
-      case "openExternalViewer":
-        void openExternalViewer(this.uri);
-        break;
     }
   }
 
