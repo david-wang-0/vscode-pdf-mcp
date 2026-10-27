@@ -307,6 +307,14 @@ container.addEventListener("wheel", (e) => {
   const pixels = e.deltaY * (e.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : e.deltaMode === WheelEvent.DOM_DELTA_PAGE ? 400 : 1);
   pdfViewer.updateScale({ scaleFactor: Math.exp(-pixels / 400), origin: [e.clientX, e.clientY] });
 }, { passive: false });
+// A plain wheel over the toolbar scrolls it sideways when it does not fit.
+$("toolbar").addEventListener("wheel", (e) => {
+  const bar = e.currentTarget;
+  if (!(bar instanceof HTMLElement) || bar.scrollWidth <= bar.clientWidth || e.ctrlKey || e.metaKey) return;
+  if (Math.abs(e.deltaX) >= Math.abs(e.deltaY)) return;
+  e.preventDefault();
+  bar.scrollLeft += e.deltaY * (e.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : e.deltaMode === WheelEvent.DOM_DELTA_PAGE ? 400 : 1);
+}, { passive: false });
 $("fitWidth").addEventListener("click", () => {
   pdfViewer.currentScaleValue = "page-width";
 });

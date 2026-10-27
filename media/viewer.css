@@ -86,16 +86,11 @@ body.finding #viewerContainer { top: 64px; }
 body.over-annot .textLayer, body.over-annot .textLayer span, body.over-annot .page { cursor: pointer; }
 body.tool-note .page, body.tool-note .textLayer, body.tool-note .textLayer span { cursor: crosshair; }
 
-#toolbar { overflow: hidden; }
-/* When the toolbar is narrow, the right-hand buttons give way first and cut
-   their labels short with an ellipsis (the title keeps the full text). */
-#toolbar .group { flex-shrink: 0; }
-#toolbar > button {
-  flex: 0 1 auto;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
+/* When the toolbar is narrower than its contents it scrolls sideways (wheel or
+   touchpad) instead of squeezing them; the scrollbar is hidden, it has no room. */
+#toolbar { overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+#toolbar::-webkit-scrollbar { display: none; }
+#toolbar > * { flex-shrink: 0; white-space: nowrap; }
 #toolbar button[aria-pressed="true"] {
   background: var(--vscode-button-background, #0e639c);
   color: var(--vscode-button-foreground, #fff);
