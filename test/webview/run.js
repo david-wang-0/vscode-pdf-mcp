@@ -180,6 +180,25 @@ test("webview renders, selects, follows goto, reloads in place and finds", async
   await page.fill("#findInput", "alpha4");
   await page.waitForFunction(() => document.getElementById("findResult")?.textContent === "1 of 1");
   await page.waitForFunction(() => /** @type {HTMLInputElement} */ (document.getElementById("pageNumber")).value === "4");
+  // while typing, each key searches at once: keys 150 ms apart never let pdf.js's own
+  // 250 ms delay for a new query run out, so only a search per key highlights a prefix
+  await page.fill("#findInput", "");
+  await page.evaluate(() => {
+    const w = /** @type {any} */ (window);
+    w.__litWhileTyping = false;
+    w.__findObserver = new MutationObserver(() => {
+      for (const h of document.querySelectorAll(".textLayer .highlight"))
+        if (["a", "al", "alp", "alph"].includes(h.textContent || "")) w.__litWhileTyping = true;
+    });
+    w.__findObserver.observe(document.getElementById("viewer"), { subtree: true, childList: true, attributes: true });
+  });
+  await page.locator("#findInput").pressSequentially("alpha", { delay: 150 });
+  const litWhileTyping = await page.evaluate(() => {
+    const w = /** @type {any} */ (window);
+    w.__findObserver.disconnect();
+    return w.__litWhileTyping;
+  });
+  assert.ok(litWhileTyping, "matches were highlighted while typing");
   await page.keyboard.press("Escape");
   assert.ok(await page.locator("#findbar").isHidden());
 

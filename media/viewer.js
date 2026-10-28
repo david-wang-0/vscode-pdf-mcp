@@ -72,7 +72,21 @@ const pdfWorker = await (async () => {
 
 const eventBus = new EventBus();
 const linkService = new PDFLinkService({ eventBus });
-const findController = new PDFFindController({ eventBus, linkService });
+/**
+ * The page a query being typed is searched from (null: the current page). Each key searches
+ * at once and scrolls to the first match, so without it the next key would search from
+ * wherever that scroll left the view and could skip the query's first match.
+ * @type {number | null}
+ */
+let findOrigin = null;
+// The find controller uses only `page` (read, and set to show a match) and `pagesCount`
+// of its link service.
+const findLinkService = /** @type {any} */ ({
+  get page() { return findOrigin ?? linkService.page; },
+  set page(n) { linkService.page = n; },
+  get pagesCount() { return linkService.pagesCount; },
+});
+const findController = new PDFFindController({ eventBus, linkService: findLinkService });
 const pdfViewer = new PDFViewer({
   container,
   eventBus,
@@ -259,7 +273,8 @@ eventBus.on("pagesinit", () => {
   pageInput.value = String(pdfViewer.currentPageNumber);
   lastView = captureView() || lastView;
   post({ type: "loaded", pages: pdfViewer.pagesCount, page: pdfViewer.currentPageNumber, reload: isReload });
-  if (!findbar.hidden && findInput.value) find("", false);
+  findOrigin = null;
+  if (!findbar.hidden && findInput.value) find("new", false);
   if (pendingFlash) requestAnimationFrame(onShown);
 });
 
@@ -290,6 +305,7 @@ new ResizeObserver(() => {
 // ---- toolbar -------------------------------------------------------------------------
 
 pageInput.addEventListener("change", () => {
+  findOrigin = null;
   const n = parseInt(pageInput.value, 10);
   if (Number.isInteger(n) && n >= 1 && n <= pdfViewer.pagesCount) pdfViewer.currentPageNumber = n;
   else pageInput.value = String(pdfViewer.currentPageNumber);
@@ -336,8 +352,16 @@ container.addEventListener("click", (e) => {
 
 // ---- find (Ctrl+F) -------------------------------------------------------------------
 
-/** @param {string} type "" for a new query, "again" for next/previous @param {boolean} previous */
+/**
+ * @param {string} type "new" for a new query, "again" for next/previous
+ * @param {boolean} previous
+ * A new query goes as a type pdf.js does not know rather than its own "": that one waits
+ * 250 ms and starts over at every keystroke, so nothing was highlighted while typing. Any
+ * other type marks the matches stale and searches at once, from `findOrigin`.
+ */
 function find(type, previous) {
+  if (type !== "new" || !findInput.value) findOrigin = null;
+  else findOrigin ??= Math.min(linkService.page, linkService.pagesCount);
   eventBus.dispatch("find", {
     source: findbar,
     type,
@@ -356,15 +380,20 @@ function openFind() {
   if (sel && sel.length < 200 && !sel.includes("\n")) findInput.value = sel;
   findInput.focus();
   findInput.select();
-  if (findInput.value) find("", false);
+  if (findInput.value) find("new", false);
 }
 function closeFind() {
   findbar.hidden = true;
   document.body.classList.remove("finding");
+  findOrigin = null;
   eventBus.dispatch("findbarclose", { source: findbar });
   container.focus();
 }
-findInput.addEventListener("input", () => find("", false));
+findInput.addEventListener("input", () => find("new", false));
+// Moving through the document yourself makes the next edit search from where you are.
+for (const el of [container, $("minimap")]) {
+  for (const type of ["wheel", "pointerdown"]) el.addEventListener(type, () => { findOrigin = null; }, { passive: true });
+}
 findInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
     e.preventDefault();
