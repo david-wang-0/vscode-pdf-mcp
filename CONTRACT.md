@@ -24,8 +24,10 @@ unit tests in each repository, named after the clause (`test_c3_...` in Python,
   1-based. `pages` is the page count.
 - **Active entry**: the one document the user is taken to be looking at. VS Code: the
   active PDF tab of the most recently focused VS Code window, or, if no window has a PDF
-  tab as its active editor, the PDF tab that was active most recently. Okular: the first
-  window that has a document open (Okular reports no focus).
+  tab as its active editor, the PDF tab that was active most recently. Okular: the tab on
+  show in the Okular window that has the keyboard focus, else in the first window that has
+  a document open (Okular names the tab on show only in its window title, which the server
+  matches against each tab's file name, path or document title).
 
 ## Tools
 
@@ -47,20 +49,22 @@ attributed to a document. `text` is `""` when nothing is selected (not an error)
 - `source="primary"`, Okular: the system primary selection (`wl-paste --primary`,
   else `xclip`/`xsel`), attributed to the active entry's path; `page` is the page among
   the current page and the pages next to it (the current page first, then the next, then
-  the previous one) on which the selected words are found in the page's text, else the
-  current page.
+  the previous one) on which the selected words are found in the page's text, or, when no
+  single one has them, the one on which they start over a page break between them (Okular
+  selects over pages), else the current page.
 - `source="clipboard"`: the system clipboard, never attributed (no `viewer`/`path`/`page`).
 - `tex` (optional): when the selection is attributed and the viewer can map it to LaTeX
   source through SyncTeX, a list of `{"file": "<absolute .tex path>", "lines": [first,
   last]}`, one entry per source file, in document order. Absent otherwise. (The VS Code
   viewer supplies it for PDFs with a `.synctex.gz`/`.synctex` next to them; Okular
-  supplies it when the selected words are found exactly once on that page and
+  supplies it when the selected words are found exactly once there and
   `synctex edit` maps them, for PDFs with a `.synctex.gz`/`.synctex` next to them.)
 - Any other `source` raises a tool error `source must be 'primary' or 'clipboard'`.
 
 **C3. `goto(page, path=None)`** shows `page` of `path` (default: the active entry's
-document), opening the document first if no window has it open, and returns the entry of
-the document after the move, with `page` equal to the requested page.
+document), bringing its tab to the front when its window shows another one, or opening the
+document first if no window or tab has it open, and returns the entry of the document after
+the move, with `page` equal to the requested page.
 - Errors: `page N outside 1-M` for a page out of range; `no such file: <path>` for a path
   that does not exist; `cannot open <path>` for a file the viewer fails to load (checked
   before the page range); C1's message if `path` is omitted and nothing is open.
@@ -113,8 +117,9 @@ it, else absolute).
 
 The selected text is cut at 2000 characters, with ` […]` appended when cut. The Okular
 hook includes the selection only when its words are found on the active document's
-current page or a page next to it, because the system primary selection is otherwise not
-tied to Okular (it may come from the terminal the user is typing in).
+current page or a page next to it, or over a page break between them, because the system
+primary selection is otherwise not tied to Okular (it may come from the terminal the user is
+typing in).
 
 **C8.** The hook prints something only when there is an active entry (VS Code: one that is
 currently its window's active editor, not the most-recent fallback of the Terms) and it
