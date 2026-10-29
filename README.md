@@ -289,7 +289,8 @@ once (there is nothing to save), and the tab reloads in place to show it.
   your login name).
 - **Side panel** (*Annotations*): every annotation by page, in reading order, with a colour
   chip, its type, author, the marked text, the note and the replies. Click one to go to it
-  and open its popover. It follows every reload.
+  and open its popover. It follows every reload. With the minimap open it sits to the
+  minimap's left, so the two columns are in the order of their toolbar buttons.
 - **Undo** (Ctrl+Z or *Undo*) takes back your last action on this document in this window:
   a new mark, note or reply is deleted, an edit, colour or style change is reverted, a
   deletion is restored with its replies. The history is per document and lasts as long as

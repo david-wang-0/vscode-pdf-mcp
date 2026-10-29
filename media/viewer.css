@@ -344,7 +344,8 @@ body.synctex-hover .page, body.synctex-hover .textLayer, body.synctex-hover .tex
 #minimap[hidden] { display: none; }
 body.finding #minimap { top: 64px; }
 body.minimap-open #viewerContainer { right: 120px; }
-body.panel-open #minimap { right: 320px; }
+/* The minimap sits at the right edge and the panel to its left, as their toolbar buttons do. */
+body.minimap-open #annotPanel { right: 120px; }
 body.minimap-open.panel-open #viewerContainer { right: 440px; }
 #minimap .thumb {
   position: relative;
