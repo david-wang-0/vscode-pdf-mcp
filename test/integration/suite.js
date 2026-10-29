@@ -207,8 +207,8 @@ async function runParts() {
 
 /**
  * The toolbar in the real webview of other.pdf (2 pages), over CDP: no Open in Okular
- * button, Annotations then the minimap icon at the right end, and the icon toggles the
- * minimap with a real click (twice, so the tab is left as it was).
+ * button, the codicon font loaded, Annotations then the minimap icon at the right end, and
+ * the icon toggles the minimap with a real click (twice, so the tab is left as it was).
  */
 async function toolbar() {
   const { chromium } = require("playwright-core");
@@ -227,6 +227,13 @@ async function toolbar() {
     assert.equal(await f.locator("#openExternal").count(), 0);
     const ids = await f.locator("#toolbar button").evaluateAll((els) => els.map((e) => e.id));
     assert.deepEqual(ids.slice(-2), ["panelToggle", "minimapToggle"]);
+    // the codicon font loads through the webview's resource URIs (localResourceRoots, CSP)
+    const font = await f.evaluate(async () => {
+      await document.fonts.ready;
+      return [...document.fonts].filter((x) => x.family.replace(/"/g, "") === "codicon").map((x) => x.status);
+    });
+    assert.ok(font.length > 0 && font.every((x) => x === "loaded"), `codicon font: ${font}`);
+    assert.equal(await f.locator("#zoomIn .codicon.codicon-zoom-in").count(), 1);
     const toggle = f.locator("#minimapToggle");
     assert.equal(await toggle.getAttribute("aria-label"), "Minimap");
     assert.equal(await toggle.getAttribute("aria-pressed"), "true");

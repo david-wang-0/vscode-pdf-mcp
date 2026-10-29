@@ -69,7 +69,8 @@ window.__reload = async (reload = true) => {
   }
   const file = url.pathname === "/__pdf" ? pdf : path.join(root, decodeURIComponent(url.pathname));
   const allowed = file === pdf || file.startsWith(path.join(root, "media") + path.sep)
-    || file.startsWith(path.join(root, "node_modules", "pdfjs-dist") + path.sep);
+    || file.startsWith(path.join(root, "node_modules", "pdfjs-dist") + path.sep)
+    || file.startsWith(path.join(root, "node_modules", "@vscode", "codicons", "dist") + path.sep);
   if (!allowed || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
     res.writeHead(404);
     res.end();

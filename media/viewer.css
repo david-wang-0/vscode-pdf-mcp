@@ -16,18 +16,27 @@ html, body {
   right: 0;
   display: flex;
   align-items: center;
-  gap: 8px;
   padding: 3px 8px;
   box-sizing: border-box;
   background: var(--vscode-editorWidget-background, #f3f3f3);
   border-bottom: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border, #ccc));
   z-index: 10;
 }
-#toolbar { top: 0; height: 32px; }
-#findbar { top: 32px; height: 32px; }
+#toolbar { top: 0; height: 32px; gap: 2px; }
+#findbar { top: 32px; height: 32px; gap: 2px; }
 #findbar[hidden] { display: none; }
-#toolbar .group { display: inline-flex; align-items: center; gap: 4px; }
+#toolbar .group { display: inline-flex; align-items: center; gap: 2px; }
 #toolbar .spacer { flex: 1; }
+/* a thin rule between groups, as between the action groups of VS Code's menus */
+#toolbar .group + .group { margin-left: 4px; }
+#toolbar .group + .group::before {
+  content: "";
+  align-self: center;
+  width: 1px;
+  height: 16px;
+  margin-right: 4px;
+  background: var(--vscode-menu-separatorBackground, var(--vscode-widget-border, rgba(127, 127, 127, 0.35)));
+}
 
 button {
   font: inherit;
@@ -48,8 +57,52 @@ input {
   padding: 1px 4px;
 }
 #pageNumber { width: 4em; text-align: right; }
-#findInput { width: 18em; }
-#zoomValue, #findResult, #numPages { opacity: 0.8; }
+#findInput { width: 18em; margin-right: 2px; }
+#zoomValue, #findResult, #numPages { color: var(--vscode-descriptionForeground, #717171); }
+#zoomValue { margin-left: 4px; }
+#findResult { margin: 0 4px; }
+
+/* Toolbar and find-bar buttons are icon actions, like those of VS Code's editor title bar
+   and find widget: no fill until hovered, a toggled one framed like the find widget's
+   Aa / .* options. The buttons in popovers and panels (.vpdf-ui) keep the dialog look of
+   the plain `button` rule above. */
+#toolbar button, #findbar button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  height: 22px;
+  min-width: 22px;
+  padding: 2px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--vscode-icon-foreground, var(--vscode-foreground, #424242));
+}
+#toolbar button:not(:disabled):not([aria-pressed="true"]):hover,
+#findbar button:not(:disabled):hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(184, 184, 184, 0.31));
+  outline: 1px dashed var(--vscode-toolbar-hoverOutline, transparent);
+  outline-offset: -1px;
+}
+#toolbar button:not(:disabled):not([aria-pressed="true"]):active,
+#findbar button:not(:disabled):active {
+  background: var(--vscode-toolbar-activeBackground, rgba(166, 166, 166, 0.31));
+}
+#toolbar button:focus-visible, #findbar button:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, #005fb8);
+  outline-offset: -1px;
+}
+#toolbar button .codicon, #findbar button .codicon { display: block; }
+#toolbar .tool:has(.glyph) { padding: 2px 3px; }
+#toolbar input, #findbar input {
+  box-sizing: border-box;
+  height: 22px;
+  border-radius: 2px;
+  outline: none;
+  padding: 2px 4px;
+}
+#toolbar input:focus, #findbar input:focus { border-color: var(--vscode-focusBorder, #005fb8); }
 
 #viewerContainer {
   position: absolute;
@@ -92,8 +145,9 @@ body.tool-note .page, body.tool-note .textLayer, body.tool-note .textLayer span 
 #toolbar::-webkit-scrollbar { display: none; }
 #toolbar > * { flex-shrink: 0; white-space: nowrap; }
 #toolbar button[aria-pressed="true"] {
-  background: var(--vscode-button-background, #0e639c);
-  color: var(--vscode-button-foreground, #fff);
+  background: var(--vscode-inputOption-activeBackground, rgba(0, 95, 184, 0.2));
+  color: var(--vscode-inputOption-activeForeground, #000);
+  border-color: var(--vscode-inputOption-activeBorder, #005fb8);
 }
 #toolbar button:disabled, .vpdf-ui button:disabled { opacity: 0.45; cursor: default; }
 .glyph { font-weight: 600; padding: 0 2px; --mark: #ffe64d; }
@@ -101,8 +155,9 @@ body.tool-note .page, body.tool-note .textLayer, body.tool-note .textLayer span 
 .glyph.g-underline { text-decoration: underline 2px var(--mark); text-underline-offset: 2px; }
 .glyph.g-squiggly { text-decoration: underline wavy var(--mark); text-underline-offset: 2px; }
 .glyph.g-strikeout { text-decoration: line-through 2px var(--mark); }
-#toolbar .glyph { --mark: currentColor; }
+#toolbar .glyph { --mark: currentColor; line-height: 14px; padding: 0 1px; }
 #toolbar .icon { display: block; width: 16px; height: 16px; }
+#toolbar .swatch { display: block; width: 12px; height: 12px; margin: 1px; }
 #toolbar .glyph.g-highlight { --mark: #ffe64d; }
 .swatch {
   display: inline-block;

@@ -116,7 +116,8 @@ class PdfPanel {
     const root = owner.context.extensionUri;
     const webview = panel.webview;
     webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.joinPath(root, "media"),
-      vscode.Uri.joinPath(root, "node_modules", "pdfjs-dist")] };
+      vscode.Uri.joinPath(root, "node_modules", "pdfjs-dist"),
+      vscode.Uri.joinPath(root, "node_modules", "@vscode", "codicons", "dist")] };
     webview.html = renderHtml({
       cspSource: webview.cspSource,
       nonce: nonce(),

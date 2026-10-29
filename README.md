@@ -205,7 +205,14 @@ The extension logs to the output channel *PDF viewer (vscode-pdf-mcp)*.
   icon (page thumbnails with your marks as coloured ticks; click or drag in it to scroll; on
   by default, and remembered). When the editor is too narrow for the toolbar, it scrolls
   sideways (wheel or touchpad). Ctrl+F opens a find bar (Enter, Shift+Enter, Escape).
-- Chrome follows the VS Code theme; pages stay white.
+- The toolbar and the find bar are icon buttons in the style of VS Code's own editor
+  toolbars and find widget: VS Code's codicons (`@vscode/codicons`), each with a tooltip
+  and an accessible name, no fill until hovered, and a tool that is on framed like the find
+  widget's *Match Case* option. Zoom out and in are magnifiers, fit width a double arrow
+  (↔), the margin-note tool a speech bubble, undo the curved arrow of *Discard*,
+  *Annotations* a list, the minimap a page with a strip of thumbnails at its right; the
+  four style tools show "ab" in their style, the colour button a swatch.
+- Chrome follows the VS Code theme (light, dark and high contrast); pages stay white.
 - The file is read through `vscode.workspace.fs` and posted to the webview, so PDFs outside
   the workspace work.
 - **Reload on change**: the file's *directory* is watched with Node's `fs.watch`, filtered by
@@ -220,7 +227,7 @@ The extension logs to the output channel *PDF viewer (vscode-pdf-mcp)*.
 
 A column of page thumbnails to the right of the pages, 100 px wide, each in its page's
 aspect ratio, with a translucent box over the part of the document on screen. It is on
-by default; the toolbar's *Minimap* hides it, and the choice is remembered per tab. A click
+by default; the toolbar's minimap icon (*Minimap*) hides it, and the choice is remembered per tab. A click
 scrolls the pages so the point you clicked is in the middle of the view (keeping the
 place within the page); a drag keeps doing so. In a long document the minimap scrolls
 along with the pages, so the box stays in view; the wheel scrolls it on its own.
@@ -260,10 +267,11 @@ once (there is nothing to save), and the tab reloads in place to show it.
   cancels). A style marks in the current colour; a colour marks in the last style. Both are
   remembered. Esc closes the bar.
 - **Toolbar.** The four style tools are sticky, like Okular's annotation bar: while one is
-  on, every selection you finish is marked at once. *Note* is the margin-note tool: click a
-  point on a page, type, Enter, and a comment icon is placed there (its top-left corner at
-  the point). The swatch button picks the colour, *Undo* undoes, *Annotations* opens the
-  side panel. Esc returns to no tool.
+  on, every selection you finish is marked at once. The speech bubble (*Margin note tool*)
+  is the margin-note tool: click a point on a page, type, Enter, and a comment icon is
+  placed there (its top-left corner at the point). The swatch button picks the colour, the
+  curved arrow (*Undo*) undoes, the list (*Annotations*) opens the side panel. Esc returns
+  to no tool.
 - **Keys**, only when the focus is not in a text field: `H` highlight, `U` underline, `S`
   squiggly, `X` strikeout (each marks the current selection), `N` the margin-note tool,
   Esc no tool, Ctrl+Z undo. Change them with `vscodePdfMcp.keys` (actions `highlight`,
@@ -651,8 +659,11 @@ installed that way, no variable is needed.
   HTML and CSP as in VS Code, with a mocked `acquireVsCodeApi`) and drives it with
   `playwright-core`: rendering, mouse selection, goto, reload in place, a half-written
   file, find, the toolbar (Annotations then the minimap icon at its right end, no *Open in
-  Okular*; too narrow, it scrolls sideways with a plain wheel but not Ctrl+wheel and keeps
-  every label whole, in a Chromium that draws scrollbars, so none takes height), and
+  Okular*; icon buttons with their codicon, an accessible name and a tooltip, the codicon
+  font loaded, 22 px high and transparent, a toggled tool in the theme's
+  `inputOption.active*` colours rather than the primary button's, the popovers' buttons
+  unchanged; too narrow, it scrolls sideways with a plain wheel but not Ctrl+wheel and keeps
+  every button whole, in a Chromium that draws scrollbars, so none takes height), and
   marking with a mocked extension: the mini-bar and the `mark`
   request with PDF-space rects, sticky tools, the margin-note click, keys, the popover
   thread and replies, edit/restyle/delete only on own marks, the side panel, and SyncTeX
@@ -684,7 +695,8 @@ installed that way, no variable is needed.
   `cannot open`), replace-by-rename reloads of a background tab,
   the hook, *Open in Okular* against a fake command (in the command palette only, not
   above the editor), the toolbar in the webview over CDP (no *Open in Okular* button, the
-  minimap icon toggles with a real click); with `pdflatex`, a LaTeX project
+  codicon font loaded through the webview's resource URIs, the minimap icon toggles with a
+  real click); with `pdflatex`, a LaTeX project
   compiled into the workspace: Ctrl+click with the real mouse opens the `\input` file at
   the line, *SyncTeX: Show in PDF* and `vscode-pdf-mcp-open --tex` scroll the PDF, both
   down to the word (the flash on the word's text-layer box, the cursor on the clicked
@@ -717,4 +729,6 @@ installed that way, no variable is needed.
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE). The .vsix also carries VS Code's codicons
+(`@vscode/codicons`: the icon font under CC BY 4.0, its code under MIT), with their licence
+files.

@@ -147,6 +147,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",
+    "@vscode/codicons": "0.0.46-24",
     "pdfjs-dist": "5.4.624",
     "zod": "4.6.6"
   },

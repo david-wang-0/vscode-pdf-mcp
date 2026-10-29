@@ -532,7 +532,7 @@ test("toolbar: Annotations, then the minimap icon at the right end; no Open in O
   assert.equal(await icon.getAttribute("aria-hidden"), "true");
   const ib = await icon.boundingBox();
   assert.ok(ib && ib.width === 16 && ib.height === 16, `icon box ${JSON.stringify(ib)}`);
-  // as tall as the labelled buttons next to it
+  // as tall as the Annotations button next to it
   const heights = await page.locator("#panelToggle, #minimapToggle").evaluateAll((els) => els.map((e) => e.getBoundingClientRect().height));
   assert.ok(Math.abs(heights[0] - heights[1]) <= 1, `heights ${heights}`);
 
@@ -549,7 +549,92 @@ test("toolbar: Annotations, then the minimap icon at the right end; no Open in O
   await page.close();
 });
 
-test("toolbar: too narrow, it scrolls sideways with a plain wheel (not Ctrl+wheel) and keeps every label whole on one line; wide enough, the wheel leaves it alone", async (ctx) => {
+test("toolbar and find bar: icon buttons in the codicon font, named and with tooltips; a toggled one framed like the find widget's options, not filled", async () => {
+  const pdf = path.join(tmp, "toolbar-icons.pdf");
+  fs.writeFileSync(pdf, samplePdf(2));
+  const vars = {
+    "--vscode-button-background": "rgb(1, 2, 3)",
+    "--vscode-inputOption-activeBackground": "rgb(10, 20, 30)",
+    "--vscode-inputOption-activeForeground": "rgb(40, 50, 60)",
+    "--vscode-inputOption-activeBorder": "rgb(70, 80, 90)",
+    "--vscode-icon-foreground": "rgb(100, 110, 120)",
+  };
+  const { page, errors } = await open(await serve(pdf));
+  // the theme's colours, as VS Code sets them on the document
+  await page.evaluate((v) => { for (const [k, x] of Object.entries(v)) document.documentElement.style.setProperty(k, x); }, vars);
+  await enableMarking(page);
+  await page.keyboard.press("Control+f");
+  await page.locator("#findbar").waitFor();
+
+  // each icon button: its codicon, an accessible name and a tooltip, no text of its own
+  const want = {
+    zoomOut: "zoom-out", zoomIn: "zoom-in", fitWidth: "arrow-both", undo: "discard", panelToggle: "list-flat",
+    findPrev: "arrow-up", findNext: "arrow-down", findClose: "close",
+  };
+  for (const [id, icon] of Object.entries(want)) {
+    const b = page.locator(`#${id}`);
+    assert.equal(await b.locator(`.codicon.codicon-${icon}[aria-hidden='true']`).count(), 1, `${id}: codicon-${icon}`);
+    assert.ok(await b.getAttribute("aria-label"), `${id}: aria-label`);
+    assert.ok(await b.getAttribute("title"), `${id}: title`);
+    assert.equal((await b.innerText()).trim(), "", `${id}: no visible text`);
+  }
+  const note = page.locator("#markTools .tool[data-tool='note']");
+  assert.equal(await note.locator(".codicon.codicon-comment").count(), 1);
+  assert.equal(await note.getAttribute("aria-label"), "Margin note tool");
+  assert.equal(await page.getByRole("button", { name: "Annotations", exact: true }).getAttribute("id"), "panelToggle");
+
+  // the codicon font is loaded (served next to its stylesheet, allowed by the CSP) and
+  // draws the glyphs: a private-use character has no width in any fallback font
+  await page.evaluate(() => document.fonts.ready);
+  assert.ok(await page.evaluate(() => document.fonts.check("16px codicon")), "codicon font loaded");
+  const glyph = await page.locator("#zoomIn .codicon").evaluate((e) => {
+    const cs = getComputedStyle(e, "::before");
+    const r = e.getBoundingClientRect();
+    return { family: getComputedStyle(e).fontFamily, content: cs.content, width: r.width, height: r.height,
+      loaded: [...document.fonts].some((f) => f.family.replace(/"/g, "") === "codicon" && f.status === "loaded") };
+  });
+  assert.equal(glyph.family, "codicon");
+  assert.ok(glyph.loaded, "codicon FontFace loaded");
+  assert.notEqual(glyph.content, "none");
+  assert.ok(glyph.width >= 14 && glyph.height >= 14, `glyph box ${glyph.width}x${glyph.height}`);
+
+  // 22 px icon buttons, transparent until hovered, in the theme's icon colour
+  const look = (/** @type {string} */ sel) => page.locator(sel).evaluate((e) => {
+    const cs = getComputedStyle(e);
+    const r = e.getBoundingClientRect();
+    return { bg: cs.backgroundColor, fg: cs.color, border: `${cs.borderTopWidth} ${cs.borderTopStyle} ${cs.borderTopColor}`, height: r.height, width: r.width };
+  });
+  for (const sel of ["#zoomIn", "#undo", "#findNext", "#markTools .tool[data-tool='highlight']"]) {
+    const l = await look(sel);
+    assert.equal(l.height, 22, `${sel}: height ${l.height}`);
+    assert.ok(l.width >= 22, `${sel}: width ${l.width}`);
+    assert.equal(l.bg, "rgba(0, 0, 0, 0)", `${sel}: background ${l.bg}`);
+  }
+  assert.equal((await look("#zoomIn")).fg, "rgb(100, 110, 120)");
+
+  // a toggled tool: the find widget's option style, not the primary button's fill
+  await page.click("#markTools .tool[data-tool='highlight']");
+  await page.mouse.move(500, 400);
+  const on = await look("#markTools .tool[data-tool='highlight']");
+  assert.equal(on.bg, "rgb(10, 20, 30)");
+  assert.equal(on.fg, "rgb(40, 50, 60)");
+  assert.equal(on.border, "1px solid rgb(70, 80, 90)");
+  assert.equal(on.height, 22);
+
+  // the buttons of popovers keep the dialog look: the note editor's Add note is filled
+  await page.click("#markTools .tool[data-tool='note']");
+  await page.locator(".page[data-page-number='1']").scrollIntoViewIfNeeded();
+  const pb = await pageBox(page);
+  await page.mouse.click(pb.left + 30 * pb.scale, pb.top + 100 * pb.scale);
+  const add = await look(".noteEditor:visible button.primary");
+  assert.equal(add.bg, "rgb(1, 2, 3)");
+  assert.notEqual(add.height, 22);
+
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+test("toolbar: too narrow, it scrolls sideways with a plain wheel (not Ctrl+wheel) and keeps every button whole on one line; wide enough, the wheel leaves it alone", async (ctx) => {
   const pdf = path.join(tmp, "toolbar-narrow.pdf");
   fs.writeFileSync(pdf, samplePdf(2));
   // Playwright's headless Chromium hides all scrollbars; this one draws them, as VS Code does
@@ -565,7 +650,8 @@ test("toolbar: too narrow, it scrolls sideways with a plain wheel (not Ctrl+whee
   }));
   await page.setViewportSize({ width: 1400, height: 800 });
   const wide = await measure();
-  await page.setViewportSize({ width: 600, height: 800 });
+  // icon buttons take little room: a narrow editor, as when split three ways
+  await page.setViewportSize({ width: 320, height: 800 });
   const bar = () => page.evaluate(() => {
     const t = /** @type {HTMLElement} */ (document.getElementById("toolbar"));
     return { scrollLeft: t.scrollLeft, scrollWidth: t.scrollWidth, clientWidth: t.clientWidth, clientHeight: t.clientHeight,
@@ -581,14 +667,14 @@ test("toolbar: too narrow, it scrolls sideways with a plain wheel (not Ctrl+whee
   assert.equal(narrow.clientHeight, narrow.height - narrow.border);
 
   // every button keeps the box it has with room to spare (no wrap onto a second line, no
-  // squeeze) inside the bar's padding, and its whole label shows (no ellipsis)
+  // squeeze) inside the bar's padding, and its whole icon or glyph shows (nothing cut)
   const buttons = await measure();
   assert.deepEqual(buttons.map((b) => b.id), wide.map((b) => b.id));
   buttons.forEach((b, i) => {
     assert.ok(Math.abs(b.width - wide[i].width) < 0.5 && Math.abs(b.height - wide[i].height) < 0.5,
       `${b.id}: ${b.width}x${b.height}, with room ${wide[i].width}x${wide[i].height}`);
     assert.ok(b.height <= 26, `${b.id}: ${b.height} px high`);
-    assert.ok(b.scrollWidth <= b.clientWidth, `${b.id}: label cut (${b.scrollWidth} > ${b.clientWidth})`);
+    assert.ok(b.scrollWidth <= b.clientWidth, `${b.id}: content cut (${b.scrollWidth} > ${b.clientWidth})`);
   });
   // the minimap toggle starts out of view
   const right = async () => {

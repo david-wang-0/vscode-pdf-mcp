@@ -20,6 +20,8 @@ const ASSETS = {
   imageResourcesPath: "node_modules/pdfjs-dist/legacy/web/images/",
   viewerJs: "media/viewer.js",
   viewerCss: "media/viewer.css",
+  // the font (codicon.ttf) is found next to it, by a URL relative to the stylesheet
+  codiconCss: "node_modules/@vscode/codicons/dist/codicon.css",
 };
 
 function nonce() {
@@ -55,6 +57,7 @@ function renderHtml({ cspSource, nonce: n, uri, extraHead = "" }) {
 <meta http-equiv="Content-Security-Policy" content="${csp}">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="${urls.pdfViewerCss}">
+<link rel="stylesheet" href="${urls.codiconCss}">
 <link rel="stylesheet" href="${urls.viewerCss}">
 ${extraHead}</head>
 <body class="minimap-open" data-config="${escapeAttr(JSON.stringify(urls))}">
@@ -64,9 +67,9 @@ ${extraHead}</head>
     <span id="numPages">/ 0</span>
   </span>
   <span class="group">
-    <button id="zoomOut" title="Zoom out" aria-label="Zoom out">&minus;</button>
-    <button id="zoomIn" title="Zoom in" aria-label="Zoom in">+</button>
-    <button id="fitWidth" title="Fit width" aria-label="Fit width">Fit width</button>
+    <button id="zoomOut" title="Zoom out" aria-label="Zoom out"><span class="codicon codicon-zoom-out" aria-hidden="true"></span></button>
+    <button id="zoomIn" title="Zoom in" aria-label="Zoom in"><span class="codicon codicon-zoom-in" aria-hidden="true"></span></button>
+    <button id="fitWidth" title="Fit width" aria-label="Fit width"><span class="codicon codicon-arrow-both" aria-hidden="true"></span></button>
     <span id="zoomValue"></span>
   </span>
   <span class="group" id="markTools" role="group" aria-label="Mark tools">
@@ -74,21 +77,21 @@ ${extraHead}</head>
     <button class="tool" data-tool="underline" aria-pressed="false" title="Underline tool" aria-label="Underline tool" disabled><span class="glyph g-underline">ab</span></button>
     <button class="tool" data-tool="squiggly" aria-pressed="false" title="Squiggly tool" aria-label="Squiggly tool" disabled><span class="glyph g-squiggly">ab</span></button>
     <button class="tool" data-tool="strikeout" aria-pressed="false" title="Strikeout tool" aria-label="Strikeout tool" disabled><span class="glyph g-strikeout">ab</span></button>
-    <button class="tool" data-tool="note" aria-pressed="false" title="Margin note tool" aria-label="Margin note tool" disabled>Note</button>
+    <button class="tool" data-tool="note" aria-pressed="false" title="Margin note tool" aria-label="Margin note tool" disabled><span class="codicon codicon-comment" aria-hidden="true"></span></button>
     <button id="colorButton" title="Colour" aria-label="Colour" aria-haspopup="true" aria-expanded="false" disabled><span class="swatch" id="colorSwatch"></span></button>
-    <button id="undo" title="Undo" aria-label="Undo" disabled>Undo</button>
+    <button id="undo" title="Undo" aria-label="Undo" disabled><span class="codicon codicon-discard" aria-hidden="true"></span></button>
   </span>
   <span class="spacer"></span>
-  <button id="panelToggle" aria-pressed="false" title="Show the annotations">Annotations</button>
+  <button id="panelToggle" aria-pressed="false" title="Show the annotations" aria-label="Annotations"><span class="codicon codicon-list-flat" aria-hidden="true"></span></button>
   <button id="minimapToggle" aria-pressed="true" title="Show the minimap" aria-label="Minimap"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="1" fill="none" stroke="currentColor"/><path d="M10 3v10" stroke="currentColor"/><rect x="10.5" y="5" width="3.5" height="4" fill="currentColor" opacity="0.35"/><path d="M11 4.5h2.5M11 6h2M11 7.5h2.5M11 9h1.5M11 10.5h2.5M11 12h2" stroke="currentColor" stroke-width="0.8"/></svg></button>
 </div>
 <div id="colorMenu" class="vpdf-ui menu" role="menu" aria-label="Colour" hidden></div>
 <div id="findbar" hidden>
   <input id="findInput" type="text" placeholder="Find in document" aria-label="Find in document">
-  <button id="findPrev" title="Previous match (Shift+Enter)" aria-label="Previous match">&uarr;</button>
-  <button id="findNext" title="Next match (Enter)" aria-label="Next match">&darr;</button>
+  <button id="findPrev" title="Previous match (Shift+Enter)" aria-label="Previous match"><span class="codicon codicon-arrow-up" aria-hidden="true"></span></button>
+  <button id="findNext" title="Next match (Enter)" aria-label="Next match"><span class="codicon codicon-arrow-down" aria-hidden="true"></span></button>
   <span id="findResult"></span>
-  <button id="findClose" title="Close (Escape)" aria-label="Close">&times;</button>
+  <button id="findClose" title="Close (Escape)" aria-label="Close"><span class="codicon codicon-close" aria-hidden="true"></span></button>
 </div>
 <div id="viewerContainer" tabindex="0"><div id="viewer" class="pdfViewer"></div></div>
 <aside id="minimap" class="vpdf-ui" aria-label="Minimap"></aside>
