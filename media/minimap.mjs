@@ -565,6 +565,8 @@ export function setupMinimap({ pdfViewer, eventBus, container, getDocument, vsco
   }
   minimap.addEventListener("pointerdown", (e) => {
     if (e.button !== 0 || !thumbs.length) return;
+    // on the scrollbar: that scrolls the minimap itself, not the pages
+    if (e.clientX - minimap.getBoundingClientRect().left - minimap.clientLeft >= minimap.clientWidth) return;
     e.preventDefault();
     minimap.setPointerCapture(e.pointerId);
     dragging = e.pointerId;

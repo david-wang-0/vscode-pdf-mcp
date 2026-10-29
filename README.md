@@ -230,7 +230,8 @@ aspect ratio, with a translucent box over the part of the document on screen. It
 by default; the toolbar's minimap icon (*Minimap*) hides it, and the choice is remembered per tab. A click
 scrolls the pages so the point you clicked is in the middle of the view (keeping the
 place within the page); a drag keeps doing so. In a long document the minimap scrolls
-along with the pages, so the box stays in view; the wheel scrolls it on its own.
+along with the pages, so the box stays in view; the wheel and its scrollbar (VS Code's, like
+the pages') scroll it on its own.
 
 - Thumbnails are copied from the pages the viewer renders: each page drawn in the main
   view is scaled down into its thumbnail, at no rendering cost. Only pages the main view
@@ -675,7 +676,8 @@ installed that way, no variable is needed.
   next to the marking preferences, the box following goto, scrolling and zoom, click and
   drag, a reload that keeps the thumbnails and re-renders them, marks drawn as coloured
   rects (replies left out), a 60-page document whose minimap scrolls with the pages and
-  renders only the thumbnails near view, the emptying of thumbnails far from view (and
+  renders only the thumbnails near view, its scrollbar (in a Chromium that draws them) beside
+  whole thumbnails, a click on which scrolls the minimap and not the pages, and none for two pages, the emptying of thumbnails far from view (and
   their return), a saved "closed" state that starts it closed, and, with the browser's
   idle callbacks stubbed out, thumbnails copied from the pages the main view draws (also
   after a reload) while a page it has not drawn stays blank.

@@ -334,13 +334,13 @@ body.synctex-hover .page, body.synctex-hover .textLayer, body.synctex-hover .tex
   padding: 2px 0 8px;
   overflow-x: hidden;
   overflow-y: auto;
-  scrollbar-width: none;
   background: var(--vscode-sideBar-background, var(--vscode-editorWidget-background, #f3f3f3));
   border-left: 1px solid var(--vscode-panel-border, var(--vscode-editorWidget-border, #ccc));
   z-index: 9;
   user-select: none;
 }
-#minimap::-webkit-scrollbar { display: none; }
+/* A long document's minimap scrolls with VS Code's own scrollbar (the webview's default
+   style, as the pages have); the 100 px thumbnails still fit beside it. */
 #minimap[hidden] { display: none; }
 body.finding #minimap { top: 64px; }
 body.minimap-open #viewerContainer { right: 120px; }

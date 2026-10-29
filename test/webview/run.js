@@ -1775,6 +1775,54 @@ test("minimap: closed through reloads, it matches the document shown when it ope
   await page.close();
 });
 
+test("minimap: a long document's minimap has a scrollbar beside whole thumbnails; a click on it scrolls the minimap, not the pages; a short one has none", async (ctx) => {
+  // Playwright's headless Chromium hides all scrollbars; this one draws them, as VS Code does
+  const scrollbars = await chromium.launch({ headless: true, executablePath: process.env.CHROMIUM || undefined, ignoreDefaultArgs: ["--hide-scrollbars"] });
+  ctx.after(() => scrollbars.close());
+  /** The minimap's scrollbar width and the thumbnails' boxes against its content box. Runs in the page. */
+  const geom = () => {
+    const m = /** @type {HTMLElement} */ (document.getElementById("minimap"));
+    const r = m.getBoundingClientRect();
+    const inner = r.left + m.clientLeft + m.clientWidth;
+    const thumbs = [...m.querySelectorAll(".thumb")].map((t) => t.getBoundingClientRect());
+    return {
+      scrollbar: m.offsetWidth - m.clientWidth - parseFloat(getComputedStyle(m).borderLeftWidth) - parseFloat(getComputedStyle(m).borderRightWidth),
+      fit: thumbs.every((t) => t.left >= r.left + m.clientLeft && t.right <= inner),
+      width: thumbs.length ? thumbs[0].width : 0,
+    };
+  };
+
+  const pdf = path.join(tmp, "minimap-scrollbar.pdf");
+  fs.writeFileSync(pdf, samplePdf(60));
+  const { page, errors } = await open(await serve(pdf), undefined, scrollbars);
+  await openMinimap(page, 60);
+  await page.waitForFunction(thumbInked, 1);
+  const g = await page.evaluate(geom);
+  assert.ok(g.scrollbar > 0, `a scrollbar: ${JSON.stringify(g)}`);
+  assert.ok(g.fit, `every thumbnail whole beside it: ${JSON.stringify(g)}`);
+  assert.ok(Math.abs(g.width - 102) <= 1, `thumbnails keep their width: ${JSON.stringify(g)}`);
+
+  // a click low on the scrollbar's track pages the minimap down and leaves the pages alone
+  const before = await page.evaluate(() => /** @type {HTMLElement} */ (document.getElementById("viewerContainer")).scrollTop);
+  const m = await page.locator("#minimap").boundingBox();
+  assert.ok(m);
+  await page.mouse.click(m.x + m.width - 1 - g.scrollbar / 2, m.y + m.height - 40);
+  await page.waitForFunction(() => /** @type {HTMLElement} */ (document.getElementById("minimap")).scrollTop > 0);
+  await page.waitForTimeout(150);
+  assert.equal(await page.evaluate(() => /** @type {HTMLElement} */ (document.getElementById("viewerContainer")).scrollTop), before, "the pages did not move");
+  await page.close();
+
+  // two pages fit the minimap: no scrollbar
+  const shortPdf = path.join(tmp, "minimap-scrollbar-short.pdf");
+  fs.writeFileSync(shortPdf, samplePdf(2));
+  const short = await open(await serve(shortPdf), undefined, scrollbars);
+  await openMinimap(short.page, 2);
+  assert.equal((await short.page.evaluate(geom)).scrollbar, 0);
+  await short.page.close();
+
+  assert.deepEqual([...errors, ...short.errors], []);
+});
+
 test("minimap: a drag ends when the pointer capture is lost or a move comes without the button; hovering then does not scroll", async () => {
   const pdf = path.join(tmp, "minimap-drag-end.pdf");
   fs.writeFileSync(pdf, samplePdf(10));
