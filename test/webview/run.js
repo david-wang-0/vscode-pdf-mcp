@@ -81,6 +81,26 @@ async function posted(page, match, from = 0) {
 /** @param {import("playwright-core").Page} page */
 const count = (page) => page.evaluate(() => /** @type {any} */ (window).__posted.length);
 
+/**
+ * Wait until the viewer has posted (after the first `from`) a selection whose text matches
+ * `want`. A mouse drag may post a part of the selection first: the viewer reports the
+ * selection once it has rested 150 ms, and a drag can pause that long when the browser is
+ * busy (seen once, on the first drag of a run, as "Th").
+ * @param {import("playwright-core").Page} page @param {RegExp} want @param {number} [from]
+ */
+async function postedSelection(page, want, from = 0) {
+  const find = () => page.evaluate((start) => /** @type {any} */ (window).__posted.slice(start)
+    .filter((/** @type {any} */ m) => m.type === "selection" && m.selection), from);
+  try {
+    const handle = await page.waitForFunction(([src, flags, start]) => /** @type {any} */ (window).__posted.slice(start)
+      .find((/** @type {any} */ m) => m.type === "selection" && m.selection && new RegExp(src, flags).test(m.selection.text)) || null,
+    /** @type {[string, string, number]} */ ([want.source, want.flags, from]), { timeout: 10000 });
+    return handle.jsonValue();
+  } catch (e) {
+    throw new Error(`no selection matching ${want} was posted; posted: ${JSON.stringify(await find())}`, { cause: e });
+  }
+}
+
 before(async () => {
   browser = await chromium.launch({ headless: true, executablePath: process.env.CHROMIUM || undefined });
 });
@@ -121,9 +141,8 @@ test("webview renders, selects, follows goto, reloads in place and finds", async
   await page.mouse.down();
   await page.mouse.move(b.x + b.width - 1, b.y + b.height / 2, { steps: 8 });
   await page.mouse.up();
-  const sel = /** @type {any} */ (await posted(page, { type: "selection", selection: "*" }, mark));
+  const sel = /** @type {any} */ (await postedSelection(page, /^This sentence is hyphenated across two lines\.?$/, mark));
   assert.equal(sel.selection.page, 2);
-  assert.match(sel.selection.text, /^This sentence is hyphenated across two lines\.?$/);
 
   // clearing the selection posts null
   mark = await count(page);
@@ -342,7 +361,7 @@ test("mini-bar: a selection shows it; a style posts a mark with PDF-space rects 
 
   let mark = await count(page);
   const box = await selectSpan(page, 1, "Reachability of timed automata");
-  const sel = /** @type {any} */ (await posted(page, { type: "selection", selection: "*" }, mark));
+  const sel = /** @type {any} */ (await postedSelection(page, /^Reachability of timed automata is decidable via regions\.$/, mark));
   assert.deepEqual(sel.selection, { text: "Reachability of timed automata is decidable via regions.", page: 1 }, "selection publishing unchanged");
   await page.locator(".miniBar:visible").waitFor();
   assert.equal(await page.locator(".miniBar .styleButton").count(), 4);
@@ -975,7 +994,7 @@ test("SyncTeX: Ctrl+hover shows a grey underline and a file:line tip from the ex
   // the underline does not get in the way of a plain selection
   mark = await count(page);
   await selectSpan(page, 1, "Filler line 6 on page 1");
-  const sel = /** @type {any} */ (await posted(page, { type: "selection", selection: "*" }, mark));
+  const sel = /** @type {any} */ (await postedSelection(page, /^Filler line 6 on page 1\.$/, mark));
   assert.equal(sel.selection.text, "Filler line 6 on page 1.");
   // with SyncTeX data the selection carries its rects in SyncTeX space
   assert.equal(sel.selection.parts.length, 1);
